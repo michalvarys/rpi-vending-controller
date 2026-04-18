@@ -1,0 +1,17 @@
+services:
+  trafika-rpi:
+    image: ghcr.io/michalvarys/trafika-rpi:latest
+    container_name: trafika-rpi
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:?WEBHOOK_TOKEN is required — set it in .env}
+      DEVICE_NAME: ${DEVICE_NAME:-}
+    volumes:
+      - ./data:/data
+    # Uncomment once real GPIO is wired up:
+    # devices:
+    #   - "/dev/gpiomem:/dev/gpiomem"
+    # group_add:
+    #   - "gpio"

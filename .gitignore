@@ -1,0 +1,26 @@
+# Secrets and local overrides
+.env
+.env.*
+!.env.example
+
+# Runtime data (bind-mounted into containers)
+data/
+rpi/data/
+hub/rpis.yml
+
+# Legacy files from the pre-Docker setup (kept locally during migration, not tracked)
+/app.py
+/config.json
+/events.log
+/trafika-vending.service
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE/OS/tool-local state
+.DS_Store
+.vscode/
+.idea/
+.claude/

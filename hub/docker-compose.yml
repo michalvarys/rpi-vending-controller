@@ -1,0 +1,12 @@
+services:
+  trafika-hub:
+    image: ghcr.io/michalvarys/trafika-hub:latest
+    container_name: trafika-hub
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      POLL_INTERVAL: ${POLL_INTERVAL:-3}
+      POLL_TIMEOUT: ${POLL_TIMEOUT:-4}
+    volumes:
+      - ./rpis.yml:/config/rpis.yml:ro

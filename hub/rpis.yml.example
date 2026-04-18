@@ -1,0 +1,13 @@
+# Registry of all Raspberry Pi controllers the hub manages.
+# Each entry must match what you put in that RPi's own .env (WEBHOOK_TOKEN, DEVICE_NAME).
+# After changes, restart the hub: `docker compose restart`.
+
+rpis:
+  - hostname: rpi-vending            # Tailscale MagicDNS name of the RPi
+    token: REPLACE_WITH_RPI_TOKEN    # Same value as WEBHOOK_TOKEN in rpi/.env on that device
+    display_name: Trafika Brno       # Pretty label shown on the hub dashboard
+    port: 8080                       # Optional; defaults to 8080
+
+  # - hostname: rpi-vending-2
+  #   token: another-token
+  #   display_name: Trafika Praha
