@@ -4,7 +4,7 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir "Flask==3.1.1" && \
     mkdir -p /app/static && \
-    python -c "import urllib.request; urllib.request.urlretrieve('https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js', '/app/static/qrcode.min.js')"
+    python -c "import urllib.request; urllib.request.urlretrieve('https://cdn.jsdelivr.net/gh/davidshimjs/qrcodejs@gh-pages/qrcode.min.js', '/app/static/qrcode.min.js')"
 
 COPY app.py ./
 

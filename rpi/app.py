@@ -486,7 +486,8 @@ QR_HTML = """<!doctype html>
   h1 { margin: 0; font-size: 1.25rem; color: var(--muted); font-weight: 500; letter-spacing: .1em; text-transform: uppercase; }
   .device { font-size: 2rem; font-weight: 700; }
   .qr-wrap { background: var(--card); padding: 1.5rem; border-radius: 1rem; }
-  canvas { display: block; }
+  .qr-wrap #qr { display: flex; align-items: center; justify-content: center; }
+  .qr-wrap img, .qr-wrap canvas { display: block; }
   .meta { color: var(--muted); font-size: .9rem; text-align: center; }
   .meta strong { color: var(--fg); font-variant-numeric: tabular-nums; }
   .qr-link { color: var(--accent); font-family: ui-monospace, monospace; font-size: .82rem; word-break: break-all; max-width: 30rem; text-align: center; text-decoration: none; padding: .4rem .8rem; border: 1px solid rgba(96,165,250,.3); border-radius: .4rem; }
@@ -499,35 +500,50 @@ QR_HTML = """<!doctype html>
 <body>
 <h1>Naskenuj pro nákup</h1>
 <div class="device">{{ device }}</div>
-<div class="qr-wrap"><canvas id="qr"></canvas></div>
+<div class="qr-wrap"><div id="qr"></div></div>
 <div class="meta" id="meta">Načítám kód…</div>
 <a id="qr-link" class="qr-link" target="_blank" rel="noopener"></a>
 <div class="warning" id="warning"></div>
 
 <script>
-const canvas = document.getElementById('qr');
+const qrHolder = document.getElementById('qr');
 const metaEl = document.getElementById('meta');
 const linkEl = document.getElementById('qr-link');
 const warnEl = document.getElementById('warning');
 let rotateAt = 0;
-let latestUrl = '';
+let qr = null;
+
+function ensureQr(text) {
+  if (qr) {
+    qr.clear();
+    qr.makeCode(text);
+    return;
+  }
+  qr = new QRCode(qrHolder, {
+    text: text,
+    width: 320,
+    height: 320,
+    correctLevel: QRCode.CorrectLevel.M,
+  });
+}
 
 async function refresh() {
   try {
     const data = await fetch('/api/qr').then(r => r.json());
+    let payload;
     if (!data.url) {
       warnEl.textContent = 'QR_BASE_URL není nastavená v .env — QR zatím ukazuje jen token, bez cílové URL pro shop.';
-      latestUrl = `token:${data.device}:${data.token}`;
+      payload = `token:${data.device}:${data.token}`;
       linkEl.removeAttribute('href');
       linkEl.textContent = '';
     } else {
       warnEl.textContent = '';
-      latestUrl = data.url;
+      payload = data.url;
       linkEl.href = data.url;
       linkEl.textContent = data.url;
     }
     rotateAt = data.rotate_at;
-    QRCode.toCanvas(canvas, latestUrl, { width: 320, margin: 2, errorCorrectionLevel: 'M' });
+    ensureQr(payload);
   } catch (e) {
     warnEl.textContent = 'Chyba při načítání kódu: ' + e;
   }
