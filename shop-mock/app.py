@@ -3,7 +3,9 @@ import logging
 import os
 import secrets
 import sys
+import time
 from functools import wraps
+from threading import Lock, Thread
 
 import requests
 from flask import Flask, jsonify, redirect, render_template_string, request, session, url_for
@@ -21,6 +23,13 @@ if not SESSION_SECRET:
 
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8081"))
+
+# How long we wait without a heartbeat before dropping the session and, if it was the last one, turning the relay off.
+HEARTBEAT_TIMEOUT_SECONDS = int(os.environ.get("HEARTBEAT_TIMEOUT_SECONDS", "30"))
+# Hard cap on a single session — relay always goes off at this point even if the browser keeps pinging.
+MAX_SESSION_SECONDS = int(os.environ.get("MAX_SESSION_SECONDS", "900"))
+# JS polling interval (sent to the template).
+HEARTBEAT_CLIENT_INTERVAL_MS = 10_000
 
 # Hardcoded mock users. Real impl will use Odoo/external identity.
 USERS = {
@@ -58,6 +67,84 @@ def is_verified(user):
     if user["role"] == "unverified" and session.get("verified_flag"):
         return True
     return False
+
+
+# ----- Session presence registry -----
+# Tracks live browser sessions so we can turn the relay off when the last one disappears
+# (tab closed, device sleep, network drop, idle user). Heartbeat extends the lifetime;
+# reaper thread prunes stale entries every few seconds.
+
+_active = {}  # sid -> {"user_id": str, "last_ping": float, "started_at": float}
+_active_lock = Lock()
+
+
+def _ensure_sid():
+    sid = session.get("sid")
+    if not sid:
+        sid = secrets.token_hex(16)
+        session["sid"] = sid
+    return sid
+
+
+def _register_presence(user_id):
+    sid = _ensure_sid()
+    now = time.time()
+    with _active_lock:
+        existing = _active.get(sid)
+        _active[sid] = {
+            "user_id": user_id,
+            "last_ping": now,
+            "started_at": existing["started_at"] if existing else now,
+        }
+
+
+def _refresh_presence():
+    sid = session.get("sid")
+    if not sid:
+        return False
+    with _active_lock:
+        entry = _active.get(sid)
+        if not entry:
+            return False
+        entry["last_ping"] = time.time()
+    return True
+
+
+def _drop_presence():
+    """Remove current session; turn relay off if nobody else is present."""
+    sid = session.get("sid")
+    if not sid:
+        return
+    with _active_lock:
+        _active.pop(sid, None)
+        remaining = len(_active)
+    if remaining == 0:
+        log.info("Session %s ended — no active sessions remain, relay off", sid)
+        hub_post("/off")
+
+
+def _reaper_loop():
+    while True:
+        time.sleep(5)
+        now = time.time()
+        expired = []
+        with _active_lock:
+            for sid, entry in list(_active.items()):
+                idle = now - entry["last_ping"]
+                age = now - entry["started_at"]
+                if idle > HEARTBEAT_TIMEOUT_SECONDS:
+                    expired.append((sid, "idle", entry["user_id"]))
+                    _active.pop(sid, None)
+                elif age > MAX_SESSION_SECONDS:
+                    expired.append((sid, "max_age", entry["user_id"]))
+                    _active.pop(sid, None)
+            remaining = len(_active)
+        for sid, reason, user_id in expired:
+            log.info("Reaper dropped session %s (user=%s, reason=%s); remaining=%d",
+                     sid, user_id, reason, remaining)
+        if expired and remaining == 0:
+            log.info("All sessions gone — turning relay off")
+            hub_post("/off")
 
 
 def hub_post(path):
@@ -102,11 +189,24 @@ def do_login():
 @app.post("/logout")
 @login_required
 def logout():
-    user = current_user()
-    if is_verified(user) or user["role"] == "admin":
-        hub_post("/off")
+    _drop_presence()
     session.clear()
     return redirect(url_for("login"))
+
+
+@app.post("/session/heartbeat")
+def session_heartbeat():
+    if _refresh_presence():
+        return jsonify(ok=True), 200
+    return jsonify(ok=False, reason="no active session"), 410
+
+
+@app.post("/session/end")
+def session_end():
+    # Expected to be hit via navigator.sendBeacon on tab close
+    _drop_presence()
+    session.clear()
+    return ("", 204)
 
 
 @app.get("/")
@@ -116,6 +216,8 @@ def home():
 
     if user["role"] == "unverified" and not session.get("verified_flag"):
         return redirect(url_for("verify"))
+
+    _register_presence(user["id"])
 
     relay_error = None
     if user["role"] in ("verified", "unverified"):
@@ -127,7 +229,10 @@ def home():
                                   user=user,
                                   state=hub_state(),
                                   relay_error=relay_error,
-                                  rpi_hostname=RPI_HOSTNAME)
+                                  rpi_hostname=RPI_HOSTNAME,
+                                  heartbeat_ms=HEARTBEAT_CLIENT_INTERVAL_MS,
+                                  heartbeat_timeout=HEARTBEAT_TIMEOUT_SECONDS,
+                                  max_session_seconds=MAX_SESSION_SECONDS)
 
 
 @app.get("/verify")
@@ -305,11 +410,30 @@ HOME_HTML = """<!doctype html>
   </div>
 
   <div class="card">
+    <div class="muted" style="margin-bottom:.8rem">
+      Automat se vypne automaticky při zavření prohlížeče, nečinnosti ({{ heartbeat_timeout }} s)
+      nebo po {{ (max_session_seconds / 60) | int }} minutách.
+    </div>
     <form method="post" action="/logout" style="margin:0">
       <button class="secondary" type="submit">Odhlásit (automat se vypne)</button>
     </form>
   </div>
 </main>
+<script>
+(function () {
+  const INTERVAL = {{ heartbeat_ms }};
+  function beat() {
+    fetch('/session/heartbeat', { method: 'POST', credentials: 'same-origin' })
+      .then(r => { if (r.status === 410) window.location.href = '/login'; })
+      .catch(() => {});
+  }
+  beat();
+  setInterval(beat, INTERVAL);
+  window.addEventListener('pagehide', () => {
+    navigator.sendBeacon('/session/end');
+  });
+})();
+</script>
 </body>
 </html>
 """
@@ -347,5 +471,7 @@ VERIFY_HTML = """<!doctype html>
 
 
 if __name__ == "__main__":
-    log.info("Starting shop-mock on %s:%s — hub=%s rpi=%s", HOST, PORT, HUB_URL, RPI_HOSTNAME)
+    log.info("Starting shop-mock on %s:%s — hub=%s rpi=%s heartbeat_timeout=%ds max_session=%ds",
+             HOST, PORT, HUB_URL, RPI_HOSTNAME, HEARTBEAT_TIMEOUT_SECONDS, MAX_SESSION_SECONDS)
+    Thread(target=_reaper_loop, daemon=True).start()
     app.run(host=HOST, port=PORT)

@@ -104,15 +104,29 @@ docker compose pull && docker compose up -d   # upgrade image
 
 ---
 
+## Presence tracking a automatické vypnutí
+
+Aby relé nezůstalo viset ON po zavření prohlížeče / uspání zařízení / ztrátě sítě, shop-mock si drží in-memory **mapu aktivních sessions** (`sid → last_ping_timestamp`):
+
+- **Heartbeat** — JS na home page pošle `POST /session/heartbeat` každých 10 s.
+- **Beacon na unload** — při zavření tabu (event `pagehide`) se přes `navigator.sendBeacon` volá `POST /session/end`, což session okamžitě ukončí (když browser spolupracuje; mobilní Safari někdy ne).
+- **Reaper thread** — každých 5 s pročistí: session bez heartbeatu > `HEARTBEAT_TIMEOUT_SECONDS` (default 30 s) je dropnutá. Session starší než `MAX_SESSION_SECONDS` (default 900 s = 15 min) je taky dropnutá.
+- **Multi-session / multi-tab** — relé se vypne **až když spadne poslední aktivní session**. Pokud je přihlášený víc účtů / víc tabů, drží je otevřené libovolný z nich.
+
+Tuning v `.env`:
+- `HEARTBEAT_TIMEOUT_SECONDS` — jak dlouho čekat bez pingu, než session dropnout.
+- `MAX_SESSION_SECONDS` — hard timeout per session (ochrana proti „visící" relé).
+
 ## Co to simuluje / co zatím neřeší
 
-- **Real Odoo integrace** — tento modul má stejné chování, jaké bude mít server action v Odoo: po úspěšném loginu volat hub `/api/rpi/<host>/on`, po logoutu `/off`.
-- **Konec session = vypnutí relé** — zatím řeší jen logout. Timeout (session vyprší) = relé zůstane zapnuté; dodělá se buď na straně hubu (timeout watcher), nebo explicitně v Odoo integraci.
+- **Real Odoo integrace** — tento modul má stejné chování, jaké bude mít server action v Odoo: po úspěšném loginu volat hub `/api/rpi/<host>/on`, po logoutu (nebo při ztrátě session) `/off`.
 - **Mapování user → RPi** — mock řídí jeden pevně nastavený RPi (`RPI_HOSTNAME`). V reálu by trafika Odoo účet měla ve svém profilu uvedený RPi hostname (nebo by trafika měla dedikované Odoo).
 - **Věková/identity verifikace** — v `VERIFY_HTML` je jen tlačítko „Ověřit (MOCK)". V reálu bankovní identita / OP / OAuth apod.
+- **Persistence sessions po restartu shop-mocku** — `_active` je in-memory. Po `docker compose restart` se mapa ztratí, aktivní browser obdrží HTTP 410 na nejbližší heartbeat a je přesměrován na /login. Relé se vypne (reaper při pádu shop-mocku neoff, ale Odoo/hub integrace by měla mít nezávislý timeout watchdog na hubu — TODO pro future).
 
 ---
 
 ## Changelog
 
+- **2026-04-18** — Presence tracking a auto-off. JS na home page pingá `/session/heartbeat` každých 10 s, `pagehide` spouští `sendBeacon` na `/session/end`. Server reaper (každých 5 s) pročistí sessions nad `HEARTBEAT_TIMEOUT_SECONDS` nebo `MAX_SESSION_SECONDS`. Relé se vypne až když žádná session nezůstane aktivní (multi-tab / multi-user safe).
 - **2026-04-18** — Počáteční verze mock shopu. 3 hardcoded účty, role-based flow (admin manual / verified auto / unverified → verify → auto), network_mode: host, volání hubu na 127.0.0.1:8080.
