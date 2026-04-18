@@ -225,15 +225,23 @@ Nové RPi se objeví v gridu na hub dashboardu (obvykle do ~3 s).
 
 ## Endpointy
 
-| Metoda | Cesta          | Auth  | Popis                                           |
-|--------|----------------|-------|-------------------------------------------------|
-| GET    | `/`            | ne    | Dashboard (HTML + JS polling 2 s)               |
-| GET    | `/api/health`  | ne    | Health check (používá Docker HEALTHCHECK i hub) |
-| GET    | `/api/state`   | ne    | Aktuální stav relé + device name                |
-| GET    | `/api/logs`    | ne    | Posledních 100 událostí                         |
-| POST   | `/ui/toggle`   | ne    | Přepnutí z dashboardu / z hub toggle tlačítka   |
-| POST   | `/webhook/on`  | token | Externí signál ON (z Odoo, z hub ON tlačítka)   |
-| POST   | `/webhook/off` | token | Externí signál OFF                              |
+| Metoda | Cesta          | Auth  | Popis                                                              |
+|--------|----------------|-------|--------------------------------------------------------------------|
+| GET    | `/`            | ne    | Dashboard (HTML + JS polling 2 s)                                  |
+| GET    | `/api/health`  | ne    | Health check (používá Docker HEALTHCHECK i hub)                    |
+| GET    | `/api/state`   | ne    | Aktuální stav relé + device name                                   |
+| GET    | `/api/status`  | ne    | Uptime, internet, disk, teplota, paměť, load + seznam `issues`     |
+| GET    | `/api/device`  | ne    | Model RPi, sériové č., OS, kernel, RAM, hostname hostu, public IP  |
+| GET    | `/api/logs`    | ne    | Posledních 100 událostí                                            |
+| POST   | `/ui/toggle`   | ne    | Přepnutí z dashboardu / z hub toggle tlačítka                      |
+| POST   | `/webhook/on`  | token | Externí signál ON (z Odoo, z hub ON tlačítka)                      |
+| POST   | `/webhook/off` | token | Externí signál OFF                                                 |
+
+**Issue flags** (v `/api/status.issues[]`, používá hub pro „needs repair" badge):
+- `no-internet` — RPi nedosáhne na 1.1.1.1 (DNS port 53). Pozn.: tailnet může pořád fungovat.
+- `low-disk` — volné místo pod 10 %.
+- `high-temp` — CPU teplota nad 80 °C.
+- `high-memory` — využití RAM nad 90 %.
 
 Endpointy bez tokenu spoléhají na to, že port 8080 je dostupný **jen přes tailnet**. Pokud někdy publikujeme port do internetu, přidat auth i na `/ui/*` a `/api/*`.
 
@@ -337,5 +345,7 @@ Udržuj tento seznam — když se něco dotáhne, přesuň do Changelogu níž a
 
 ## Changelog
 
+- **2026-04-18** — Reporting stavu a HW info. Přidány `/api/status` (uptime, internet ping, disk, teplota, RAM, load, issue flags) a `/api/device` (model, sériové č., host OS, kernel, public IP, LOCATION z env). Compose bind-mountuje `/etc/os-release` a `/etc/hostname` z hostu. Přibyla `LOCATION` env proměnná (volitelná). Hub grid karty ukazují health badge, metriky a „Info o zařízení". `install.sh` se ptá na polohu.
+- **2026-04-18** — Přidán `scripts/install.sh` — jeden-liner instalace pro čisté RPi (apt, Docker, Tailscale, compose, start, tisk YAML bloku pro hub). Idempotentní.
 - **2026-04-18** — Migrace na Docker: image `ghcr.io/michalvarys/trafika-rpi`, konfigurace přes `.env`, bind-mount `./data` pro event log, HEALTHCHECK v image. `app.py` přestal generovat `config.json` — token jen z env. Přibyl `/api/health` endpoint. Původní apt+systemd instalace dostupná v gitu před tímto commitem (v `/home/varyshop/trafika/` na master RPi jako zkumavkový stav během migrace).
 - **2026-04-18** — Počáteční verze (apt+systemd). Tailscale + Flask webhook + dashboard + systemd, mock GPIO. Master: `rpi-vending` (100.71.128.86). VPS: `varyshop-trafika-vps` (100.66.209.58).

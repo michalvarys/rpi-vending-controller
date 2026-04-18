@@ -174,4 +174,5 @@ Docker kontejner neběží nebo spadl do restart loopu. `docker compose logs` uk
 
 ## Changelog
 
+- **2026-04-18** — Karty ukazují health status (healthy / N issues / offline), polohu zařízení, metriky (internet, uptime, disk, CPU teplota, RAM, load) a rozbalitelné „Info o zařízení" (model, sériové č., host OS, kernel, public IP). Hub nově polluje `/api/status` a `/api/device` kromě `/api/state` a `/api/logs`. Při krátkém výpadku RPi se uchovává poslední známý stav device info, aby karta nezmizela.
 - **2026-04-18** — Počáteční verze hubu. Image `ghcr.io/michalvarys/trafika-hub`, YAML registry RPi, poll interval 3 s, grid UI s per-RPi kartami, proxy endpointy pro ON/OFF/Toggle.
