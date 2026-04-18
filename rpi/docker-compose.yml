@@ -9,6 +9,8 @@ services:
       WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:?WEBHOOK_TOKEN is required — set it in .env}
       DEVICE_NAME: ${DEVICE_NAME:-}
       LOCATION: ${LOCATION:-}
+      QR_ROTATE_SECONDS: ${QR_ROTATE_SECONDS:-60}
+      QR_BASE_URL: ${QR_BASE_URL:-}
     volumes:
       - ./data:/data
       - /etc/os-release:/etc/host-os-release:ro

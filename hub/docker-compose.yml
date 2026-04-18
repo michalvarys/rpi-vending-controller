@@ -8,5 +8,6 @@ services:
     environment:
       POLL_INTERVAL: ${POLL_INTERVAL:-3}
       POLL_TIMEOUT: ${POLL_TIMEOUT:-4}
+      QR_ROTATE_SECONDS: ${QR_ROTATE_SECONDS:-60}
     volumes:
       - ./rpis.yml:/config/rpis.yml:ro

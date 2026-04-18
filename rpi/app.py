@@ -1,5 +1,8 @@
 """Trafika vending controller — webhook receiver + live dashboard (env-configured)."""
+import base64
 import ctypes
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -23,6 +26,14 @@ HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
 DEVICE_NAME = os.environ.get("DEVICE_NAME", socket.gethostname())
 LOCATION = os.environ.get("LOCATION", "").strip()
+
+# QR flow: every QR_ROTATE_SECONDS the access token rotates. The shop (real Odoo in
+# production, shop-mock for now) validates the token against the hub, which recomputes
+# the HMAC using the RPi's WEBHOOK_TOKEN as the shared secret.
+QR_ROTATE_SECONDS = int(os.environ.get("QR_ROTATE_SECONDS", "60"))
+# Public URL of the shop that handles QR activation. Real deployment: public Odoo
+# instance (https://shop.example.com). Mock/dev: tailnet shop-mock.
+QR_BASE_URL = os.environ.get("QR_BASE_URL", "").rstrip("/")
 DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parent))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = DATA_DIR / "events.log"
@@ -273,6 +284,46 @@ def api_status():
     })
 
 
+def qr_token(hostname, secret, rotate_seconds, window_offset=0, now=None):
+    """HMAC-based rotating token. Same formula lives on the hub for validation."""
+    if now is None:
+        now = time.time()
+    window = int(now // rotate_seconds) + window_offset
+    msg = f"{hostname}:{window}".encode()
+    mac = hmac.new(secret.encode(), msg, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac[:9]).decode().rstrip("=")
+
+
+def qr_next_rotation(rotate_seconds, now=None):
+    if now is None:
+        now = time.time()
+    return int((int(now // rotate_seconds) + 1) * rotate_seconds)
+
+
+@app.get("/api/qr")
+def api_qr():
+    now = time.time()
+    token = qr_token(DEVICE_NAME, WEBHOOK_TOKEN, QR_ROTATE_SECONDS, now=now)
+    if QR_BASE_URL:
+        url = f"{QR_BASE_URL}/activate/{DEVICE_NAME}/{token}"
+    else:
+        # No shop URL configured — still return the token so the client can render something
+        url = None
+    return jsonify({
+        "device": DEVICE_NAME,
+        "token": token,
+        "url": url,
+        "rotate_at": qr_next_rotation(QR_ROTATE_SECONDS, now=now),
+        "rotate_seconds": QR_ROTATE_SECONDS,
+        "now": int(now),
+    })
+
+
+@app.get("/qr")
+def qr_page():
+    return render_template_string(QR_HTML, device=DEVICE_NAME)
+
+
 @app.get("/api/device")
 def api_device():
     mem_total_mb, _ = _memory()
@@ -415,6 +466,76 @@ async function toggle() {
 }
 refresh();
 setInterval(refresh, 2000);
+</script>
+</body>
+</html>
+"""
+
+
+QR_HTML = """<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<title>{{ device }} — QR</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { --bg:#0f172a; --fg:#e2e8f0; --muted:#64748b; --card:#ffffff; --accent:#60a5fa; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--fg);
+         min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1.5rem; padding: 2rem; }
+  h1 { margin: 0; font-size: 1.25rem; color: var(--muted); font-weight: 500; letter-spacing: .1em; text-transform: uppercase; }
+  .device { font-size: 2rem; font-weight: 700; }
+  .qr-wrap { background: var(--card); padding: 1.5rem; border-radius: 1rem; }
+  canvas { display: block; }
+  .meta { color: var(--muted); font-size: .9rem; text-align: center; }
+  .meta strong { color: var(--fg); font-variant-numeric: tabular-nums; }
+  .warning { color: #fca5a5; font-size: .85rem; max-width: 30rem; text-align: center; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+</head>
+<body>
+<h1>Naskenuj pro nákup</h1>
+<div class="device">{{ device }}</div>
+<div class="qr-wrap"><canvas id="qr"></canvas></div>
+<div class="meta" id="meta">Načítám kód…</div>
+<div class="warning" id="warning"></div>
+
+<script>
+const canvas = document.getElementById('qr');
+const metaEl = document.getElementById('meta');
+const warnEl = document.getElementById('warning');
+let rotateAt = 0;
+let latestUrl = '';
+
+async function refresh() {
+  try {
+    const data = await fetch('/api/qr').then(r => r.json());
+    if (!data.url) {
+      warnEl.textContent = 'QR_BASE_URL není nastavená v .env — QR zatím ukazuje jen token, bez cílové URL pro shop.';
+      latestUrl = `token:${data.device}:${data.token}`;
+    } else {
+      warnEl.textContent = '';
+      latestUrl = data.url;
+    }
+    rotateAt = data.rotate_at;
+    QRCode.toCanvas(canvas, latestUrl, { width: 320, margin: 2, errorCorrectionLevel: 'M' });
+  } catch (e) {
+    warnEl.textContent = 'Chyba při načítání kódu: ' + e;
+  }
+}
+
+function tickMeta() {
+  const remaining = Math.max(0, rotateAt - Math.floor(Date.now() / 1000));
+  metaEl.innerHTML = remaining > 0
+    ? `Kód vyprší za <strong>${remaining}s</strong>`
+    : `Obnovuji…`;
+  if (remaining === 0) {
+    refresh();
+  }
+}
+
+refresh();
+setInterval(tickMeta, 1000);
 </script>
 </body>
 </html>

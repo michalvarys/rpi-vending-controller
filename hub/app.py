@@ -1,4 +1,7 @@
 """Trafika central hub — aggregates state across all RPi controllers."""
+import base64
+import hashlib
+import hmac
 import logging
 import os
 import time
@@ -9,11 +12,13 @@ from threading import Lock, Thread
 
 import requests
 import yaml
-from flask import Flask, abort, jsonify, render_template_string
+from flask import Flask, abort, jsonify, render_template_string, request
 
 RPIS_FILE = Path(os.environ.get("RPIS_FILE", "/config/rpis.yml"))
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "3"))
 POLL_TIMEOUT = float(os.environ.get("POLL_TIMEOUT", "4"))
+# Must match QR_ROTATE_SECONDS on the RPi side. Hub recomputes the same HMAC window.
+QR_ROTATE_SECONDS = int(os.environ.get("QR_ROTATE_SECONDS", "60"))
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
 
@@ -175,6 +180,34 @@ def api_restart(hostname):
         return jsonify(ok=True, message=r.json().get("message"))
     except requests.RequestException as e:
         return jsonify(ok=False, error=str(e)), 502
+
+
+def _qr_token(hostname, secret, rotate_seconds, window_offset=0, now=None):
+    if now is None:
+        now = time.time()
+    window = int(now // rotate_seconds) + window_offset
+    msg = f"{hostname}:{window}".encode()
+    mac = hmac.new(secret.encode(), msg, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(mac[:9]).decode().rstrip("=")
+
+
+@app.post("/api/qr/validate")
+def api_qr_validate():
+    payload = request.get_json(silent=True) or {}
+    hostname = (payload.get("rpi_hostname") or "").strip()
+    token = (payload.get("token") or "").strip()
+    if not hostname or not token:
+        return jsonify(valid=False, reason="missing rpi_hostname or token"), 400
+    rpi = next((r for r in RPIS if r["hostname"] == hostname), None)
+    if rpi is None:
+        return jsonify(valid=False, reason="unknown rpi"), 404
+    now = time.time()
+    # Accept current window + previous one so drift between QR display and login flow doesn't reject.
+    for offset in (0, -1):
+        expected = _qr_token(hostname, rpi["token"], QR_ROTATE_SECONDS, offset, now)
+        if hmac.compare_digest(expected, token):
+            return jsonify(valid=True, rpi_hostname=hostname, window_offset=offset), 200
+    return jsonify(valid=False, reason="token mismatch"), 200
 
 
 @app.get("/api/health")

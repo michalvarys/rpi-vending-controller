@@ -85,6 +85,7 @@ Odhlášení (`Odhlásit`) na všech kartách volá hub `/off` pro navázaný RP
 | POST   | `/login`      | ne            | Přihlášení (session cookie)                       |
 | POST   | `/logout`     | session       | Odhlášení + vypnutí relé                          |
 | GET    | `/`                  | session       | Role-based home + viditelný countdown timer      |
+| GET    | `/activate/<rpi>/<token>` | ne        | Vstup z QR kódu. Validuje přes hub, pinne RPi do session, redirect na /login. |
 | GET    | `/verify`            | session       | Ověřovací obrazovka (jen pro unverified)         |
 | POST   | `/verify`            | session       | Označí session jako ověřenou                     |
 | POST   | `/relay/on`          | session+verif | Admin nebo verified → hub `/on`                  |
@@ -131,6 +132,22 @@ Implementace:
 
 Pozn.: dokud nemáme reálný GPIO signál z vending automatu (purchase / button press), tohle je čisté UI-side řízení. Až bude HW signál (nákup proběhl), můžeme buď automaticky prodloužit timer, nebo ukončit session ihned po dokončení nákupu — to už je business decision.
 
+## QR aktivační flow
+
+Reálný produkční scénář: zákazník stojí u automatu, naskenuje mobilem QR na displeji, otevře se mu shop, přihlásí se, automat naskočí. QR rotuje (default 60 s), takže sdílet URL přes WhatsApp partě kámošů nefunguje — do minuty je neplatný.
+
+Kroky:
+
+1. **RPi** má endpoint `/qr` — live stránka s QR kódem. Token přepočítává každých `QR_ROTATE_SECONDS` vteřin jako `HMAC-SHA256(WEBHOOK_TOKEN, hostname + ":" + floor(now / 60))[:9]` v base64url. QR nese URL `<QR_BASE_URL>/activate/<hostname>/<token>`.
+2. **Uživatel** QR scanne, prohlížeč otevře `/activate/rpi-vending/abc123`.
+3. **Shop-mock** zavolá `POST <HUB_URL>/api/qr/validate` se stejnými parametry. Hub si v `rpis.yml` najde RPi, zrekonstruuje token, porovná. Akceptuje aktuální window + přechozí (drift mezi zobrazením QR a dokončením loginu).
+4. Pokud valid → `session["pinned_rpi"] = hostname`, redirect na `/login`. Pin přežije `session.clear()` při úspěšném loginu (jinak by pin zmizel).
+5. Home page volá hub `/on` pro **pinned RPi** (ne pro hardcoded default). Nad badge zobrazí „přes QR" tag.
+
+**Pozn. pro integraci s reálným Odoo:**
+
+Tento `/activate/<rpi>/<token>` routing musí v Odoo modulu přibýt jako vlastní controller (např. `/trafika/activate/<rpi>/<token>`). Logika stejná: volat hub `/api/qr/validate`, pinovat RPi do session, po přihlášení zákazníka na něj zavolat hub `/on`. Hub z shop-mocku i z Odoo volá stejnou HTTP API.
+
 ## Co to simuluje / co zatím neřeší
 
 - **Real Odoo integrace** — tento modul má stejné chování, jaké bude mít server action v Odoo: po úspěšném loginu volat hub `/api/rpi/<host>/on`, po logoutu (nebo při ztrátě session) `/off`.
@@ -142,6 +159,7 @@ Pozn.: dokud nemáme reálný GPIO signál z vending automatu (purchase / button
 
 ## Changelog
 
+- **2026-04-18** — QR aktivační flow. `GET /activate/<rpi>/<token>` validuje přes hub, pinne RPi do session, provede uživatele loginem. Po loginu home volá hub `/on` pro pinned RPi místo hardcoded defaultu. Ze shop-mocku `RPI_HOSTNAME` se stal `DEFAULT_RPI_HOSTNAME` — používá se jen pro login bez QR (testovací nebo admin).
 - **2026-04-18** — Admin session je bez odpočtu. Admin karta v UI neobsahuje countdown ani Extend tlačítko; `expires_at = ∞`, reaper nikdy neexpiruje admina podle timeru. Liveness timeout (30 s bez heartbeatu) pořád platí.
 - **2026-04-18** — Defaulty timeru zkráceny: `SESSION_DURATION_SECONDS=60` (z 180), `EXTEND_SECONDS=30` (z 180). Hard cap zachován (900 s). Vending UX: kratší kus „kreditu" + drobnější extends je realističtější pro krátký nákup.
 - **2026-04-18** — Nahrazena activity-based idle detekce **viditelným countdown timerem** + tlačítkem Prodloužit. Defaultně 3 min od loginu, +3 min za click, max 15 min. Activity tracking (mouse / key / scroll listener) odstraněn — uživatel teď čas řídí explicitně. Liveness heartbeat zachovaný pro disconnect detection. Nové env vars `SESSION_DURATION_SECONDS` a `EXTEND_SECONDS`; `ACTIVITY_TIMEOUT_SECONDS` zrušen.

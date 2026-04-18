@@ -26,6 +26,8 @@ set -euo pipefail
 : "${LOCATION:=}"
 : "${WEBHOOK_TOKEN:=}"
 : "${TAILSCALE_AUTH_KEY:=}"
+: "${QR_BASE_URL:=}"
+: "${QR_ROTATE_SECONDS:=60}"
 : "${PORT:=8080}"
 
 INSTALL_DIR="/opt/trafika-rpi"
@@ -118,6 +120,7 @@ fi
 DEVICE_NAME="${DEVICE_NAME:-$TS_HOSTNAME}"
 DISPLAY_NAME="${DISPLAY_NAME:-$DEVICE_NAME}"
 prompt LOCATION "" "Poloha (např. 'Praha, Vinohrady' — lze nechat prázdné)"
+prompt QR_BASE_URL "" "URL shopu pro QR aktivaci (např. http://varyshop-trafika-vps:8081, lze prázdné)"
 
 if [[ -z "$WEBHOOK_TOKEN" ]]; then
   WEBHOOK_TOKEN=$(openssl rand -base64 32 | tr -d '=+/' | cut -c1-43)
@@ -135,6 +138,8 @@ cat > "$INSTALL_DIR/.env" <<ENVFILE
 WEBHOOK_TOKEN=$WEBHOOK_TOKEN
 DEVICE_NAME=$DEVICE_NAME
 LOCATION=$LOCATION
+QR_BASE_URL=$QR_BASE_URL
+QR_ROTATE_SECONDS=$QR_ROTATE_SECONDS
 PORT=$PORT
 ENVFILE
 chmod 600 "$INSTALL_DIR/.env"

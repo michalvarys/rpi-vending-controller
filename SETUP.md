@@ -237,6 +237,8 @@ Nové RPi se objeví v gridu na hub dashboardu (obvykle do ~3 s).
 | POST   | `/webhook/on`  | token | Externí signál ON (z Odoo, z hub ON tlačítka)                      |
 | POST   | `/webhook/off` | token | Externí signál OFF                                                 |
 | POST   | `/api/restart` | token | **Reboot celého hosta (RPi)** přes `reboot(2)` syscall. Nedostupné ~30-60 s. Fallback na restart kontejneru, když chybí CAP_SYS_BOOT. |
+| GET    | `/qr`          | ne    | Stránka s rotujícím QR kódem (určená pro lokální displej u automatu).              |
+| GET    | `/api/qr`      | ne    | Aktuální QR payload: `{device, token, url, rotate_at, rotate_seconds}`.            |
 
 **Issue flags** (v `/api/status.issues[]`, používá hub pro „needs repair" badge):
 - `no-internet` — RPi nedosáhne na 1.1.1.1 (DNS port 53). Pozn.: tailnet může pořád fungovat.
@@ -346,6 +348,7 @@ Udržuj tento seznam — když se něco dotáhne, přesuň do Changelogu níž a
 
 ## Changelog
 
+- **2026-04-18** — QR aktivační flow. Nové endpointy `/qr` (stránka s live QR) a `/api/qr` (aktuální token). Token = HMAC-SHA256(`WEBHOOK_TOKEN`, `hostname:floor(now/60)`), rotuje každých `QR_ROTATE_SECONDS` (default 60 s). Dvě nové env proměnné: `QR_BASE_URL` (veřejná URL shopu) a `QR_ROTATE_SECONDS`. QR vede na `<QR_BASE_URL>/activate/<hostname>/<token>` — ta trasa patří do reálného Odoo modulu (mock implementace v `shop-mock/`). Hub má `POST /api/qr/validate` s identickým HMAC výpočtem.
 - **2026-04-18** — `/api/restart` nyní **rebootuje celé RPi** (ne jen kontejner). Používá `reboot(2)` syscall přes ctypes; compose nově přidává `cap_add: [SYS_BOOT]`. Při chybějící capability se degraduje na restart kontejneru. UI tooltip a confirm dialog v hubu aktualizované.
 - **2026-04-18** — Remote restart. Nový endpoint `POST /api/restart` (token-protected) — zaloguje událost, odpoví 200, po 1 s zavolá `os._exit(0)`. Docker `restart: unless-stopped` kontejner pustí znovu; relé přejde do defaultního OFF. V hub UI nové tlačítko `↻` s confirm dialogem.
 - **2026-04-18** — Reporting stavu a HW info. Přidány `/api/status` (uptime, internet ping, disk, teplota, RAM, load, issue flags) a `/api/device` (model, sériové č., host OS, kernel, public IP, LOCATION z env). Compose bind-mountuje `/etc/os-release` a `/etc/hostname` z hostu. Přibyla `LOCATION` env proměnná (volitelná). Hub grid karty ukazují health badge, metriky a „Info o zařízení". `install.sh` se ptá na polohu.

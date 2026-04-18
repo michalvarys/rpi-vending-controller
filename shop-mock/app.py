@@ -12,9 +12,10 @@ from flask import Flask, jsonify, redirect, render_template_string, request, ses
 from threading import Timer
 
 HUB_URL = os.environ.get("HUB_URL", "http://127.0.0.1:8080").rstrip("/")
-RPI_HOSTNAME = os.environ.get("RPI_HOSTNAME", "").strip()
-if not RPI_HOSTNAME:
-    print("FATAL: RPI_HOSTNAME env var is required", file=sys.stderr)
+# Default RPi for direct logins (no QR). QR activations override per-session.
+DEFAULT_RPI_HOSTNAME = os.environ.get("RPI_HOSTNAME", "").strip()
+if not DEFAULT_RPI_HOSTNAME:
+    print("FATAL: RPI_HOSTNAME env var is required (default target for non-QR logins)", file=sys.stderr)
     sys.exit(1)
 
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "").strip()
@@ -246,31 +247,66 @@ def _reaper_loop():
             _schedule_relay_off()
 
 
-def hub_post(path):
+def session_rpi():
+    """Which RPi this browser session is driving. QR-based activation pins it in the session;
+    otherwise fall back to the shop's configured default."""
+    return session.get("pinned_rpi") or DEFAULT_RPI_HOSTNAME
+
+
+def hub_post(path, rpi_hostname=None):
+    host = rpi_hostname or session_rpi()
     try:
-        r = requests.post(f"{HUB_URL}/api/rpi/{RPI_HOSTNAME}{path}", timeout=5)
+        r = requests.post(f"{HUB_URL}/api/rpi/{host}{path}", timeout=5)
         r.raise_for_status()
         return True, None
     except requests.RequestException as e:
-        log.warning("hub call failed: %s%s — %s", HUB_URL, path, e)
+        log.warning("hub call failed: %s/api/rpi/%s%s — %s", HUB_URL, host, path, e)
         return False, str(e)
 
 
-def hub_state():
+def hub_state(rpi_hostname=None):
+    host = rpi_hostname or session_rpi()
     try:
         for rpi in requests.get(f"{HUB_URL}/api/dashboard", timeout=3).json():
-            if rpi["hostname"] == RPI_HOSTNAME:
+            if rpi["hostname"] == host:
                 return rpi
     except (requests.RequestException, ValueError):
         pass
     return None
 
 
+def hub_validate_qr(hostname, token):
+    try:
+        r = requests.post(f"{HUB_URL}/api/qr/validate",
+                          json={"rpi_hostname": hostname, "token": token},
+                          timeout=5)
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as e:
+        log.warning("QR validate failed: %s", e)
+        return {"valid": False, "reason": str(e)}
+
+
+@app.get("/activate/<rpi>/<token>")
+def activate_qr(rpi, token):
+    result = hub_validate_qr(rpi, token)
+    if not result.get("valid"):
+        return render_template_string(QR_ERROR_HTML,
+                                      reason=result.get("reason", "unknown"),
+                                      rpi=rpi), 400
+    # Pin this RPi for the rest of the browser session; surviving login/logout cycles
+    # isn't important, just the immediate login flow.
+    session.clear()
+    session["pinned_rpi"] = rpi
+    return redirect(url_for("login"))
+
+
 @app.get("/login")
 def login():
     if current_user():
         return redirect(url_for("home"))
-    return render_template_string(LOGIN_HTML, error=request.args.get("error"))
+    pinned = session.get("pinned_rpi")
+    return render_template_string(LOGIN_HTML, error=request.args.get("error"), pinned_rpi=pinned)
 
 
 @app.post("/login")
@@ -280,8 +316,12 @@ def do_login():
     user = USERS.get(username)
     if not user or user["password"] != password:
         return redirect(url_for("login", error="bad_credentials"))
+    # Preserve pinned_rpi (QR activation) across session reset
+    pinned = session.get("pinned_rpi")
     session.clear()
     session["user_id"] = username
+    if pinned:
+        session["pinned_rpi"] = pinned
     return redirect(url_for("home"))
 
 
@@ -341,7 +381,8 @@ def home():
                                   user=user,
                                   state=hub_state(),
                                   relay_error=relay_error,
-                                  rpi_hostname=RPI_HOSTNAME,
+                                  rpi_hostname=session_rpi(),
+                                  pinned_via_qr=bool(session.get("pinned_rpi")),
                                   heartbeat_ms=HEARTBEAT_CLIENT_INTERVAL_MS,
                                   heartbeat_timeout=HEARTBEAT_TIMEOUT_SECONDS,
                                   session_duration=SESSION_DURATION_SECONDS,
@@ -457,6 +498,9 @@ LOGIN_HTML = """<!doctype html>
   <div class="tag">MOCK shop (stand-in za Odoo)</div>
 
   <div class="card">
+    {% if pinned_rpi %}<div style="background:rgba(96,165,250,.15);color:var(--accent);padding:.6rem .9rem;border-radius:.5rem;margin-bottom:1rem;font-size:.9rem">
+      Aktivace přes QR pro <strong>{{ pinned_rpi }}</strong>. Po přihlášení se automat zapne.
+    </div>{% endif %}
     {% if error %}<div class="error">Špatné uživatelské jméno nebo heslo.</div>{% endif %}
     <form method="post" action="/login">
       <label for="u">Uživatel</label>
@@ -500,7 +544,7 @@ HOME_HTML = """<!doctype html>
     {% if user.role == 'admin' %}<span class="badge admin">admin</span>
     {% elif user.role == 'verified' %}<span class="badge verified">ověřený</span>
     {% else %}<span class="badge verified">ověřený (mock)</span>{% endif %}
-    &nbsp; · &nbsp; automat: {{ rpi_hostname }}
+    &nbsp; · &nbsp; automat: {{ rpi_hostname }}{% if pinned_via_qr %} <span class="badge admin">přes QR</span>{% endif %}
   </div>
 
   {% if relay_error %}<div class="error">Nepodařilo se zapnout automat přes hub: {{ relay_error }}</div>{% endif %}
@@ -634,6 +678,28 @@ HOME_HTML = """<!doctype html>
 </body>
 </html>
 """
+
+QR_ERROR_HTML = """<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<title>QR neplatný — Trafika</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>""" + BASE_CSS + """</style>
+</head>
+<body>
+<main>
+  <h1>QR kód je neplatný</h1>
+  <div class="tag">automat: {{ rpi }}</div>
+  <div class="card">
+    <div class="error">Důvod: {{ reason }}</div>
+    <p class="muted" style="margin-top:1rem">Nejčastější důvod — QR vypršel (rotuje se každých 60 s). Naskenuj čerstvý kód přímo u automatu.</p>
+  </div>
+</main>
+</body>
+</html>
+"""
+
 
 VERIFY_HTML = """<!doctype html>
 <html lang="cs">
