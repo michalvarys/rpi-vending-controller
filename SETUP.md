@@ -95,8 +95,8 @@ cd /opt/trafika-rpi
 Stáhni `docker-compose.yml` a `.env.example` z repa (bez klonování — stačí raw URL):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/michalvarys/trafika/main/rpi/docker-compose.yml -o docker-compose.yml
-curl -fsSL https://raw.githubusercontent.com/michalvarys/trafika/main/rpi/.env.example -o .env
+curl -fsSL https://raw.githubusercontent.com/michalvarys/rpi-vending-controller/main/rpi/docker-compose.yml -o docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/michalvarys/rpi-vending-controller/main/rpi/.env.example -o .env
 mkdir -p data
 ```
 
@@ -296,7 +296,7 @@ Udržuj tento seznam — když se něco dotáhne, přesuň do Changelogu níž a
 ## Jak udržovat tento návod
 
 - **Po každé změně `rpi/app.py`, `rpi/Dockerfile`, `docker-compose.yml` nebo postupu** edituj tento soubor a přidej záznam do Changelogu.
-- Při nasazení nového RPi používej `:latest` tag. Pokud chceš konkrétní verzi, použij `:sha-<short>` nebo `:v<semver>` — dostupné tagy vidíš v GHCR: https://github.com/michalvarys/trafika/pkgs/container/trafika-rpi
+- Při nasazení nového RPi používej `:latest` tag. Pokud chceš konkrétní verzi, použij `:sha-<short>` nebo `:v<semver>` — dostupné tagy vidíš v GHCR: https://github.com/michalvarys/rpi-vending-controller/pkgs/container/trafika-rpi
 - Když se něco z roadmapy hotově — přesuň položku z „Co ještě není hotové" do Changelogu.
 
 ---

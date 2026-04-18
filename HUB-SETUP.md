@@ -26,9 +26,9 @@ cd /opt/trafika-hub
 ## 2. Stažení compose souboru a konfigurace
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/michalvarys/trafika/main/hub/docker-compose.yml -o docker-compose.yml
-curl -fsSL https://raw.githubusercontent.com/michalvarys/trafika/main/hub/.env.example -o .env
-curl -fsSL https://raw.githubusercontent.com/michalvarys/trafika/main/hub/rpis.yml.example -o rpis.yml
+curl -fsSL https://raw.githubusercontent.com/michalvarys/rpi-vending-controller/main/hub/docker-compose.yml -o docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/michalvarys/rpi-vending-controller/main/hub/.env.example -o .env
+curl -fsSL https://raw.githubusercontent.com/michalvarys/rpi-vending-controller/main/hub/rpis.yml.example -o rpis.yml
 ```
 
 Edituj `rpis.yml` — přidej všechny RPi, které chceš spravovat:
