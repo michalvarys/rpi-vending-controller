@@ -339,15 +339,15 @@ def relay_on():
     user = current_user()
     if user["role"] != "admin" and not is_verified(user):
         return jsonify(ok=False, error="account not verified"), 403
-    ok, err = hub_post("/on")
-    return (jsonify(ok=True), 200) if ok else (jsonify(ok=False, error=err), 502)
+    hub_post("/on")
+    return redirect(url_for("home"))
 
 
 @app.post("/relay/off")
 @login_required
 def relay_off():
-    ok, err = hub_post("/off")
-    return (jsonify(ok=True), 200) if ok else (jsonify(ok=False, error=err), 502)
+    hub_post("/off")
+    return redirect(url_for("home"))
 
 
 @app.get("/api/health")
