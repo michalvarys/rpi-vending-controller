@@ -6,6 +6,40 @@ Tento dokument popisuje, jak od nuly rozjet Raspberry Pi s containerizovaným ve
 
 ---
 
+## 🚀 Rychlá instalace (install script)
+
+Pro čistý Raspberry Pi — jeden příkaz udělá všechno (apt, Docker, Tailscale, compose, start):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/michalvarys/rpi-vending-controller/main/scripts/install.sh | sudo bash
+```
+
+Nebo bezpečněji (stáhnout, mrknout na kód, spustit):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/michalvarys/rpi-vending-controller/main/scripts/install.sh -o install.sh
+sudo bash install.sh
+```
+
+Script je **interaktivní** — zeptá se na Tailscale hostname a provede tě Tailscale přihlášením (URL v terminálu). **Idempotentní** — když ho pustíš znovu (např. po update), nic nerozbije: zachová existující token a hostname.
+
+**Neinteraktivní režim** (pro automatizaci / multi-device deploy):
+
+```bash
+curl -fsSL https://tailscale.com/admin/settings/keys   # vygeneruj auth key v Tailscale admin konzoli
+curl -fsSL https://raw.githubusercontent.com/michalvarys/rpi-vending-controller/main/scripts/install.sh \
+  | sudo TS_HOSTNAME=rpi-trafika-praha \
+         DISPLAY_NAME="Trafika Praha" \
+         TAILSCALE_AUTH_KEY=tskey-auth-XXXX \
+         bash
+```
+
+Na konci vypíše YAML blok připravený k vložení do `/opt/trafika-hub/rpis.yml` na VPS. Pak stačí na VPS `cd /opt/trafika-hub && docker compose restart` a nový RPi naskočí do gridu.
+
+**Pokud preferuješ krok-za-krokem pochopení**, pokračuj sekcemi 0–9 níž.
+
+---
+
 ## 0. Prerekvizity
 
 - Raspberry Pi s Raspberry Pi OS (Debian) — testováno na Pi s aarch64 (kernel 6.12). Image je multiarch, takže poběží i na amd64 dev stroji.
