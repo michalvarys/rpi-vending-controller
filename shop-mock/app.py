@@ -9,6 +9,7 @@ from threading import Lock, Thread
 
 import requests
 from flask import Flask, jsonify, redirect, render_template_string, request, session, url_for
+from threading import Timer
 
 HUB_URL = os.environ.get("HUB_URL", "http://127.0.0.1:8080").rstrip("/")
 RPI_HOSTNAME = os.environ.get("RPI_HOSTNAME", "").strip()
@@ -84,6 +85,41 @@ def is_verified(user):
 _active = {}  # sid -> {"user_id": str, "last_ping": float, "started_at": float}
 _active_lock = Lock()
 
+# When the last session disappears we wait GRACE_SECONDS before turning the relay off.
+# Purpose: a same-origin form submit fires `pagehide` on the outgoing page (which beacons
+# /session/end), and only afterwards does the target page load and re-register presence.
+# Without the grace window we would off+on in rapid succession, occasionally ending with
+# the off winning the race.
+GRACE_SECONDS = 3
+_pending_off_timer = None
+_pending_off_lock = Lock()
+
+
+def _schedule_relay_off():
+    global _pending_off_timer
+
+    def fire():
+        with _active_lock:
+            still_empty = not _active
+        if still_empty:
+            log.info("Grace elapsed with no sessions — turning relay off")
+            hub_post("/off")
+
+    with _pending_off_lock:
+        if _pending_off_timer is not None:
+            _pending_off_timer.cancel()
+        _pending_off_timer = Timer(GRACE_SECONDS, fire)
+        _pending_off_timer.daemon = True
+        _pending_off_timer.start()
+
+
+def _cancel_pending_off():
+    global _pending_off_timer
+    with _pending_off_lock:
+        if _pending_off_timer is not None:
+            _pending_off_timer.cancel()
+            _pending_off_timer = None
+
 
 def _ensure_sid():
     sid = session.get("sid")
@@ -116,6 +152,7 @@ def _register_presence(user_id, role=""):
             "expires_at": expires_at,
             "started_at": started,
         }
+    _cancel_pending_off()
 
 
 def _refresh_alive():
@@ -175,7 +212,7 @@ def _current_session_view():
 
 
 def _drop_presence():
-    """Remove current session; turn relay off if nobody else is present."""
+    """Remove current session. If nobody else is present, schedule a deferred relay off."""
     sid = session.get("sid")
     if not sid:
         return
@@ -183,8 +220,8 @@ def _drop_presence():
         _active.pop(sid, None)
         remaining = len(_active)
     if remaining == 0:
-        log.info("Session %s ended — no active sessions remain, relay off", sid)
-        hub_post("/off")
+        log.info("Session %s ended — scheduling relay off in %ds", sid, GRACE_SECONDS)
+        _schedule_relay_off()
 
 
 def _reaper_loop():
@@ -205,8 +242,8 @@ def _reaper_loop():
             log.info("Reaper dropped session %s (user=%s, reason=%s); remaining=%d",
                      sid, user_id, reason, remaining)
         if expired and remaining == 0:
-            log.info("All sessions gone — turning relay off")
-            hub_post("/off")
+            log.info("All sessions gone — scheduling relay off in %ds", GRACE_SECONDS)
+            _schedule_relay_off()
 
 
 def hub_post(path):
@@ -275,9 +312,11 @@ def session_extend():
 
 @app.post("/session/end")
 def session_end():
-    # Expected to be hit via navigator.sendBeacon on tab close
+    # Hit via navigator.sendBeacon on pagehide. We do NOT clear the browser session here
+    # because same-origin navigation (form submit, internal link) also fires pagehide —
+    # clearing would log the user out mid-navigation. The grace window on _drop_presence
+    # gives the follow-up request a chance to re-register before the relay turns off.
     _drop_presence()
-    session.clear()
     return ("", 204)
 
 

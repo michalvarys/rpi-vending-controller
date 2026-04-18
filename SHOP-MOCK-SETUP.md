@@ -125,7 +125,8 @@ Implementace:
 - **Liveness ping** — `setInterval(ping, 10s)` v JS, server jen bumpuje `last_alive`.
 - **Extend** — `POST /session/extend` posune `expires_at` o `EXTEND_SECONDS` (cap na `started_at + MAX_SESSION_SECONDS`). UI immediately restartuje countdown.
 - **Reaper** — každé 2 s projde sessions: drop pokud `now - last_alive > HEARTBEAT_TIMEOUT_SECONDS` (reason `disconnected`) **nebo** `now > expires_at` (reason `timer_expired`). Při expiraci poslední session se zavolá hub `/off`.
-- **Pagehide beacon** — `navigator.sendBeacon('/session/end')` při zavření tabu pro okamžitý cleanup.
+- **Pagehide beacon** — `navigator.sendBeacon('/session/end')` při zavření tabu. Drop presence, **nečistí session cookie** (same-origin form submit taky spouští pagehide).
+- **Grace window (`GRACE_SECONDS=3`)** — když poslední session odpadne, hub `/off` se nevolá hned. Jakákoli `_register_presence` v grace intervalu ho zruší. Brání race condition u form submit (pagehide+beacon vs. následující navigace).
 - **Multi-session / multi-tab** — relé padá až když `len(_active) == 0`. Každá session má vlastní časovač.
 
 Pozn.: dokud nemáme reálný GPIO signál z vending automatu (purchase / button press), tohle je čisté UI-side řízení. Až bude HW signál (nákup proběhl), můžeme buď automaticky prodloužit timer, nebo ukončit session ihned po dokončení nákupu — to už je business decision.
