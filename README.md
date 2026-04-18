@@ -1,6 +1,6 @@
 # Trafika vending controller
 
-Dockerized systém pro bezpečné zapínání napájení vending automatů v trafikách. Raspberry Pi v každé trafice spíná relé jen na signál z Odoo (webhook). Centrální hub na VPS dává přehled a manuální kontrolu nad všemi RPi.
+Dockerized systém pro bezpečné zapínání napájení vending automatů v trafikách. Raspberry Pi v každé trafice spíná relé jen na signál z backendu. Centrální hub na VPS dává přehled a manuální kontrolu nad všemi RPi.
 
 ## Komponenty
 
