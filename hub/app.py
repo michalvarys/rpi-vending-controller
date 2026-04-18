@@ -268,7 +268,24 @@ const ISSUE_LABELS = {
   'high-memory': 'vysoká RAM',
 };
 
+function captureUI() {
+  const open = new Set();
+  document.querySelectorAll('details[open]').forEach(el => {
+    if (el.dataset.id) open.add(el.dataset.id);
+  });
+  return { open, scrollY: window.scrollY };
+}
+
+function restoreUI(ui) {
+  ui.open.forEach(id => {
+    const el = document.querySelector(`details[data-id="${CSS.escape(id)}"]`);
+    if (el) el.open = true;
+  });
+  window.scrollTo(0, ui.scrollY);
+}
+
 async function refresh() {
+  const ui = captureUI();
   let data;
   try {
     data = await fetch('/api/dashboard').then(r => r.json());
@@ -282,6 +299,7 @@ async function refresh() {
     return;
   }
   document.getElementById('grid').innerHTML = data.map(renderCard).join('');
+  restoreUI(ui);
 }
 
 function fmtUptime(seconds) {
@@ -407,11 +425,11 @@ function renderCard(d) {
         <button onclick="rpiCall('${d.hostname}','toggle',this)" ${reachable ? '' : 'disabled'}>Toggle</button>
       </div>
 
-      <details>
+      <details data-id="device-${escapeHtml(d.hostname)}">
         <summary>Info o zařízení</summary>
         ${deviceInfo}
       </details>
-      <details>
+      <details data-id="log-${escapeHtml(d.hostname)}">
         <summary>Log (${(d.logs || []).length})</summary>
         ${logs}
       </details>
