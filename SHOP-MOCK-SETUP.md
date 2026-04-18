@@ -84,12 +84,15 @@ Odhlášení (`Odhlásit`) na všech kartách volá hub `/off` pro navázaný RP
 | GET    | `/login`      | ne            | Formulář                                         |
 | POST   | `/login`      | ne            | Přihlášení (session cookie)                       |
 | POST   | `/logout`     | session       | Odhlášení + vypnutí relé                          |
-| GET    | `/`           | session       | Role-based home (admin / verified / unverified) |
-| GET    | `/verify`     | session       | Ověřovací obrazovka (jen pro unverified)         |
-| POST   | `/verify`     | session       | Označí session jako ověřenou                     |
-| POST   | `/relay/on`   | session+verif | Admin nebo verified → hub `/on`                  |
-| POST   | `/relay/off`  | session       | Kdokoli → hub `/off`                             |
-| GET    | `/api/health` | ne            | Health check (Docker HEALTHCHECK)                |
+| GET    | `/`                  | session       | Role-based home + viditelný countdown timer      |
+| GET    | `/verify`            | session       | Ověřovací obrazovka (jen pro unverified)         |
+| POST   | `/verify`            | session       | Označí session jako ověřenou                     |
+| POST   | `/relay/on`          | session+verif | Admin nebo verified → hub `/on`                  |
+| POST   | `/relay/off`         | session       | Kdokoli → hub `/off`                             |
+| POST   | `/session/heartbeat` | session       | Liveness ping (browser žije). Vrací aktuální view timeru. |
+| POST   | `/session/extend`    | session       | Posune `expires_at` o `EXTEND_SECONDS` (cap na MAX). |
+| POST   | `/session/end`       | -             | Volá `pagehide`/`sendBeacon` při zavření tabu.   |
+| GET    | `/api/health`        | ne            | Health check (Docker HEALTHCHECK)                |
 
 ---
 
@@ -104,31 +107,27 @@ docker compose pull && docker compose up -d   # upgrade image
 
 ---
 
-## Presence tracking a automatické vypnutí
+## Časovač + auto-off
 
-Aby relé nezůstalo viset ON, shop-mock si drží in-memory **mapu aktivních sessions** (`sid → {last_alive, last_activity, started_at}`) a sleduje **dvě nezávislé časové osy**:
+Po loginu uživatel dostane **viditelný countdown** (default 3 min). Když dojde na 0, relé se vypne. Uživatel může čas prodloužit kliknutím na **Prodloužit o X min** — kolik se přidá je konfigurovatelné, ale nikdy se nepřesáhne hard cap `MAX_SESSION_SECONDS` (default 15 min od loginu).
 
-| Časová osa | Co to mapuje | Default timeout | Catches |
+| Mechanismus | Co řeší | Default | Env var |
 |---|---|---|---|
-| **Liveness** | Browser je naživu | `HEARTBEAT_TIMEOUT_SECONDS` = 30 s | Tab zavřený, crash, sleep, ztráta sítě |
-| **Activity** | Uživatel se aktivně dotýká UI | `ACTIVITY_TIMEOUT_SECONDS` = 180 s (3 min) | „Uživatel odešel od automatu, ale tab zůstal otevřený" |
+| **Countdown timer** | „Kolik času ti zbývá" | 180 s | `SESSION_DURATION_SECONDS` |
+| **Extend tlačítko** | Dobrovolné prodloužení | +180 s | `EXTEND_SECONDS` |
+| **Liveness heartbeat** | Browser zavřený / crash / sleep | 30 s bez pingu | `HEARTBEAT_TIMEOUT_SECONDS` |
+| **Hard cap** | Maximální session | 15 min | `MAX_SESSION_SECONDS` |
 
-Plus **hard cap** `MAX_SESSION_SECONDS` = 900 s (15 min) — relé se vypne i kdyby browser pingal donekonečna.
+Implementace:
 
-Mechanismus:
+- Server drží `_active[sid] = {user_id, last_alive, expires_at, started_at}`.
+- **Liveness ping** — `setInterval(ping, 10s)` v JS, server jen bumpuje `last_alive`.
+- **Extend** — `POST /session/extend` posune `expires_at` o `EXTEND_SECONDS` (cap na `started_at + MAX_SESSION_SECONDS`). UI immediately restartuje countdown.
+- **Reaper** — každé 2 s projde sessions: drop pokud `now - last_alive > HEARTBEAT_TIMEOUT_SECONDS` (reason `disconnected`) **nebo** `now > expires_at` (reason `timer_expired`). Při expiraci poslední session se zavolá hub `/off`.
+- **Pagehide beacon** — `navigator.sendBeacon('/session/end')` při zavření tabu pro okamžitý cleanup.
+- **Multi-session / multi-tab** — relé padá až když `len(_active) == 0`. Každá session má vlastní časovač.
 
-- **Liveness ping** — `setInterval(ping_alive, 10s)`. Automatický, nezávisí na uživateli.
-- **Activity ping** — listener na `mousedown / keydown / touchstart / scroll / mousemove`, debounce 5 s. Pingá jen když se v UI něco děje.
-- **Beacon na unload** — `pagehide` event spustí `navigator.sendBeacon('/session/end')` → okamžitý cleanup (když browser spolupracuje).
-- **Reaper thread** — každých 5 s projde sessions a kontroluje **všechny tři** podmínky. Při expiraci poslední session zavolá hub `/off`.
-- **Multi-session / multi-tab** — relé padá až když je `len(_active) == 0`. Aktivní tab v jiném okně udrží relé i když ostatní vypadly.
-
-Tuning v `.env`:
-- `HEARTBEAT_TIMEOUT_SECONDS` — disconnect threshold.
-- `ACTIVITY_TIMEOUT_SECONDS` — user idle threshold.
-- `MAX_SESSION_SECONDS` — hard kap.
-
-Pozn.: dokud nemáme reálný GPIO signál z vending automatu (purchase / button press), je „user activity v shop UI" nejbližší proxy pro „aktivita u automatu". Až bude HW signál, doplníme třetí timeline (machine activity) na straně RPi a hub by měl propagovat „relay-active-but-no-machine-activity" stav.
+Pozn.: dokud nemáme reálný GPIO signál z vending automatu (purchase / button press), tohle je čisté UI-side řízení. Až bude HW signál (nákup proběhl), můžeme buď automaticky prodloužit timer, nebo ukončit session ihned po dokončení nákupu — to už je business decision.
 
 ## Co to simuluje / co zatím neřeší
 
@@ -141,6 +140,7 @@ Pozn.: dokud nemáme reálný GPIO signál z vending automatu (purchase / button
 
 ## Changelog
 
+- **2026-04-18** — Nahrazena activity-based idle detekce **viditelným countdown timerem** + tlačítkem Prodloužit. Defaultně 3 min od loginu, +3 min za click, max 15 min. Activity tracking (mouse / key / scroll listener) odstraněn — uživatel teď čas řídí explicitně. Liveness heartbeat zachovaný pro disconnect detection. Nové env vars `SESSION_DURATION_SECONDS` a `EXTEND_SECONDS`; `ACTIVITY_TIMEOUT_SECONDS` zrušen.
 - **2026-04-18** — Activity-based idle timeout. Heartbeat se rozpadl na liveness (auto, každých 10 s, timeout 30 s) a activity (debounced user interakce, timeout 180 s = 3 min). Reaper kontroluje obě osy + hard cap MAX_SESSION_SECONDS. Nový env var `ACTIVITY_TIMEOUT_SECONDS`.
 - **2026-04-18** — Presence tracking a auto-off. JS na home page pingá `/session/heartbeat` každých 10 s, `pagehide` spouští `sendBeacon` na `/session/end`. Server reaper (každých 5 s) pročistí sessions nad `HEARTBEAT_TIMEOUT_SECONDS` nebo `MAX_SESSION_SECONDS`. Relé se vypne až když žádná session nezůstane aktivní (multi-tab / multi-user safe).
 - **2026-04-18** — Počáteční verze mock shopu. 3 hardcoded účty, role-based flow (admin manual / verified auto / unverified → verify → auto), network_mode: host, volání hubu na 127.0.0.1:8080.

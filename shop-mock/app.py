@@ -24,20 +24,19 @@ if not SESSION_SECRET:
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8081"))
 
-# How long we wait without a *liveness* heartbeat before dropping the session.
+# How long we wait without a liveness heartbeat before dropping the session.
 # Liveness pings come automatically every ~10 s as long as the browser is alive,
 # so this catches: tab closed, crash, sleep, network drop.
 HEARTBEAT_TIMEOUT_SECONDS = int(os.environ.get("HEARTBEAT_TIMEOUT_SECONDS", "30"))
-# How long we wait without any *user activity* (mouse / key / touch / scroll)
-# before dropping the session even if the browser is still pinging. Catches:
-# user walked away from the machine but tab stayed open.
-ACTIVITY_TIMEOUT_SECONDS = int(os.environ.get("ACTIVITY_TIMEOUT_SECONDS", "180"))
-# Hard cap on a single session — relay always goes off at this point even if the browser keeps pinging.
+# Initial countdown timer length granted on login. After this expires the relay
+# turns off unless the user has explicitly clicked "extend".
+SESSION_DURATION_SECONDS = int(os.environ.get("SESSION_DURATION_SECONDS", "180"))
+# How many seconds each "Prodloužit" click adds. Capped at MAX_SESSION_SECONDS total.
+EXTEND_SECONDS = int(os.environ.get("EXTEND_SECONDS", "180"))
+# Hard cap on a single session — relay always goes off at this point even if the user keeps extending.
 MAX_SESSION_SECONDS = int(os.environ.get("MAX_SESSION_SECONDS", "900"))
-# JS polling interval (sent to the template).
+# JS liveness polling interval (sent to the template).
 HEARTBEAT_CLIENT_INTERVAL_MS = 10_000
-# Debounce window on activity pings — at most one per N ms even if user types continuously.
-ACTIVITY_DEBOUNCE_MS = 5_000
 
 # Hardcoded mock users. Real impl will use Odoo/external identity.
 USERS = {
@@ -99,27 +98,70 @@ def _register_presence(user_id):
     now = time.time()
     with _active_lock:
         existing = _active.get(sid)
+        started = existing["started_at"] if existing else now
+        max_expires = started + MAX_SESSION_SECONDS
+        # Initial timer: SESSION_DURATION_SECONDS, but never beyond the hard cap.
+        # On re-register (page reload mid-session), keep whatever expires_at we already have.
+        if existing and existing.get("expires_at"):
+            expires_at = existing["expires_at"]
+        else:
+            expires_at = min(now + SESSION_DURATION_SECONDS, max_expires)
         _active[sid] = {
             "user_id": user_id,
             "last_alive": now,
-            "last_activity": now,
-            "started_at": existing["started_at"] if existing else now,
+            "expires_at": expires_at,
+            "started_at": started,
         }
 
 
-def _refresh_presence(kind="alive"):
+def _refresh_alive():
     sid = session.get("sid")
     if not sid:
         return False
-    now = time.time()
     with _active_lock:
         entry = _active.get(sid)
         if not entry:
             return False
-        entry["last_alive"] = now
-        if kind == "activity":
-            entry["last_activity"] = now
+        entry["last_alive"] = time.time()
     return True
+
+
+def _extend_session():
+    sid = session.get("sid")
+    if not sid:
+        return None
+    now = time.time()
+    with _active_lock:
+        entry = _active.get(sid)
+        if not entry:
+            return None
+        max_expires = entry["started_at"] + MAX_SESSION_SECONDS
+        new_expires = min(entry["expires_at"] + EXTEND_SECONDS, max_expires)
+        entry["expires_at"] = new_expires
+        entry["last_alive"] = now
+        return _entry_view(entry, now)
+
+
+def _entry_view(entry, now=None):
+    if now is None:
+        now = time.time()
+    max_expires = entry["started_at"] + MAX_SESSION_SECONDS
+    return {
+        "expires_in": max(0, int(round(entry["expires_at"] - now))),
+        "max_remaining": max(0, int(round(max_expires - now))),
+        "at_max": entry["expires_at"] >= max_expires - 0.5,
+    }
+
+
+def _current_session_view():
+    sid = session.get("sid")
+    if not sid:
+        return None
+    with _active_lock:
+        entry = _active.get(sid)
+        if not entry:
+            return None
+        return _entry_view(entry)
 
 
 def _drop_presence():
@@ -137,23 +179,16 @@ def _drop_presence():
 
 def _reaper_loop():
     while True:
-        time.sleep(5)
+        time.sleep(2)
         now = time.time()
         expired = []
         with _active_lock:
             for sid, entry in list(_active.items()):
-                liveness_idle = now - entry["last_alive"]
-                activity_idle = now - entry["last_activity"]
-                age = now - entry["started_at"]
-                reason = None
-                if liveness_idle > HEARTBEAT_TIMEOUT_SECONDS:
-                    reason = "disconnected"
-                elif activity_idle > ACTIVITY_TIMEOUT_SECONDS:
-                    reason = "user_idle"
-                elif age > MAX_SESSION_SECONDS:
-                    reason = "max_age"
-                if reason:
-                    expired.append((sid, reason, entry["user_id"]))
+                if now - entry["last_alive"] > HEARTBEAT_TIMEOUT_SECONDS:
+                    expired.append((sid, "disconnected", entry["user_id"]))
+                    _active.pop(sid, None)
+                elif now > entry["expires_at"]:
+                    expired.append((sid, "timer_expired", entry["user_id"]))
                     _active.pop(sid, None)
             remaining = len(_active)
         for sid, reason, user_id in expired:
@@ -213,10 +248,19 @@ def logout():
 
 @app.post("/session/heartbeat")
 def session_heartbeat():
-    kind = request.args.get("kind", "alive")
-    if _refresh_presence(kind=kind):
-        return jsonify(ok=True), 200
-    return jsonify(ok=False, reason="no active session"), 410
+    if not _refresh_alive():
+        return jsonify(ok=False, reason="no active session"), 410
+    view = _current_session_view()
+    return jsonify(ok=True, **(view or {})), 200
+
+
+@app.post("/session/extend")
+@login_required
+def session_extend():
+    view = _extend_session()
+    if view is None:
+        return jsonify(ok=False, reason="no active session"), 410
+    return jsonify(ok=True, **view), 200
 
 
 @app.post("/session/end")
@@ -236,6 +280,7 @@ def home():
         return redirect(url_for("verify"))
 
     _register_presence(user["id"])
+    view = _current_session_view() or {"expires_in": 0, "max_remaining": 0, "at_max": False}
 
     relay_error = None
     if user["role"] in ("verified", "unverified"):
@@ -250,9 +295,12 @@ def home():
                                   rpi_hostname=RPI_HOSTNAME,
                                   heartbeat_ms=HEARTBEAT_CLIENT_INTERVAL_MS,
                                   heartbeat_timeout=HEARTBEAT_TIMEOUT_SECONDS,
-                                  activity_timeout=ACTIVITY_TIMEOUT_SECONDS,
-                                  activity_debounce_ms=ACTIVITY_DEBOUNCE_MS,
-                                  max_session_seconds=MAX_SESSION_SECONDS)
+                                  session_duration=SESSION_DURATION_SECONDS,
+                                  extend_seconds=EXTEND_SECONDS,
+                                  max_session_seconds=MAX_SESSION_SECONDS,
+                                  expires_in=view["expires_in"],
+                                  max_remaining=view["max_remaining"],
+                                  at_max=view["at_max"])
 
 
 @app.get("/verify")
@@ -337,6 +385,12 @@ BASE_CSS = """
   .preset-row { display: flex; justify-content: space-between; padding: .35rem 0; border-bottom: 1px solid var(--border); font-family: ui-monospace, monospace; font-size: .78rem; }
   .preset-row:last-child { border: 0; }
   .preset-row .use { color: var(--accent); cursor: pointer; }
+  .timer { text-align: center; padding: 1.2rem 0 .4rem; }
+  .timer .label { color: var(--muted); font-size: .8rem; text-transform: uppercase; letter-spacing: .1em; margin-bottom: .4rem; }
+  .timer .value { font-size: 3rem; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+  .timer.urgent .value { color: var(--off); animation: pulse 1s ease-in-out infinite; }
+  .timer .max { color: var(--muted); font-size: .8rem; margin-top: .5rem; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
 """
 
 LOGIN_HTML = """<!doctype html>
@@ -430,10 +484,19 @@ HOME_HTML = """<!doctype html>
   </div>
 
   <div class="card">
+    <div class="timer" id="timer" data-expires-in="{{ expires_in }}" data-max-remaining="{{ max_remaining }}" data-at-max="{{ 'true' if at_max else 'false' }}">
+      <div class="label">Čas do vypnutí</div>
+      <div class="value" id="timer-value">—</div>
+      <div class="max" id="timer-max"></div>
+    </div>
+    <button class="full ok" id="extend-btn" type="button" onclick="extendSession()">
+      Prodloužit o {{ (extend_seconds / 60) | int }} min
+    </button>
+  </div>
+
+  <div class="card">
     <div class="muted" style="margin-bottom:.8rem">
-      Automat se vypne při zavření prohlížeče, ztrátě spojení ({{ heartbeat_timeout }} s),
-      <strong>nečinnosti uživatele ({{ (activity_timeout / 60) | round(1) }} min)</strong>,
-      nebo nejpozději po {{ (max_session_seconds / 60) | int }} min od přihlášení.
+      Automat se vypne při vypršení časovače, zavření prohlížeče, nebo nejpozději po {{ (max_session_seconds / 60) | int }} min od přihlášení.
     </div>
     <form method="post" action="/logout" style="margin:0">
       <button class="secondary" type="submit">Odhlásit (automat se vypne)</button>
@@ -443,35 +506,73 @@ HOME_HTML = """<!doctype html>
 <script>
 (function () {
   const LIVENESS_INTERVAL = {{ heartbeat_ms }};
-  const ACTIVITY_DEBOUNCE = {{ activity_debounce_ms }};
+  const timerEl = document.getElementById('timer');
+  const valueEl = document.getElementById('timer-value');
+  const maxEl = document.getElementById('timer-max');
+  const extendBtn = document.getElementById('extend-btn');
 
-  function ping(kind) {
-    fetch('/session/heartbeat?kind=' + kind, { method: 'POST', credentials: 'same-origin' })
+  let expiresIn = parseInt(timerEl.dataset.expiresIn || '0', 10);
+  let maxRemaining = parseInt(timerEl.dataset.maxRemaining || '0', 10);
+  let atMax = timerEl.dataset.atMax === 'true';
+
+  function fmt(s) {
+    if (s < 0) s = 0;
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return m + ':' + (sec < 10 ? '0' : '') + sec;
+  }
+
+  function render() {
+    valueEl.textContent = fmt(expiresIn);
+    timerEl.classList.toggle('urgent', expiresIn <= 30);
+    maxEl.textContent = atMax
+      ? 'Dosažen maximální čas — nelze prodloužit, zbývá ' + fmt(maxRemaining)
+      : 'Max v této session: ' + fmt(maxRemaining);
+    extendBtn.disabled = atMax || maxRemaining <= 0;
+  }
+
+  function tick() {
+    if (expiresIn > 0) expiresIn -= 1;
+    if (maxRemaining > 0) maxRemaining -= 1;
+    render();
+    if (expiresIn <= 0) {
+      // Server reaper has likely already fired (or will within ~2s). Force-check.
+      fetch('/session/heartbeat', { method: 'POST', credentials: 'same-origin' })
+        .then(r => { if (r.status === 410) window.location.href = '/login'; });
+    }
+  }
+
+  async function extendSession() {
+    extendBtn.disabled = true;
+    try {
+      const r = await fetch('/session/extend', { method: 'POST', credentials: 'same-origin' });
+      if (r.status === 410) { window.location.href = '/login'; return; }
+      const data = await r.json();
+      expiresIn = data.expires_in;
+      maxRemaining = data.max_remaining;
+      atMax = !!data.at_max;
+      render();
+    } catch (e) {
+      // restore enabled state if request failed
+      render();
+    }
+  }
+  window.extendSession = extendSession;
+
+  // Liveness ping (catches tab close / disconnect; orthogonal to the user-controlled timer)
+  function liveness() {
+    fetch('/session/heartbeat', { method: 'POST', credentials: 'same-origin' })
       .then(r => { if (r.status === 410) window.location.href = '/login'; })
       .catch(() => {});
   }
+  liveness();
+  setInterval(liveness, LIVENESS_INTERVAL);
 
-  // Liveness — automatic, says "browser is alive". Catches tab close / disconnect.
-  ping('alive');
-  setInterval(() => ping('alive'), LIVENESS_INTERVAL);
+  // Tick every second for the countdown display
+  render();
+  setInterval(tick, 1000);
 
-  // Activity — only on user interaction, debounced. Catches "user walked away".
-  let activityScheduled = false;
-  function noteActivity() {
-    if (activityScheduled) return;
-    activityScheduled = true;
-    setTimeout(() => { activityScheduled = false; ping('activity'); }, ACTIVITY_DEBOUNCE);
-  }
-  // Page load itself counts as activity
-  ping('activity');
-  ['mousedown', 'keydown', 'touchstart', 'scroll', 'mousemove'].forEach(ev => {
-    document.addEventListener(ev, noteActivity, { passive: true });
-  });
-
-  // Fast cleanup when the tab closes (sendBeacon fires reliably during unload)
-  window.addEventListener('pagehide', () => {
-    navigator.sendBeacon('/session/end');
-  });
+  window.addEventListener('pagehide', () => navigator.sendBeacon('/session/end'));
 })();
 </script>
 </body>
@@ -511,8 +612,8 @@ VERIFY_HTML = """<!doctype html>
 
 
 if __name__ == "__main__":
-    log.info("Starting shop-mock on %s:%s — hub=%s rpi=%s liveness=%ds activity=%ds max_session=%ds",
+    log.info("Starting shop-mock on %s:%s — hub=%s rpi=%s liveness=%ds session=%ds extend=%ds max=%ds",
              HOST, PORT, HUB_URL, RPI_HOSTNAME,
-             HEARTBEAT_TIMEOUT_SECONDS, ACTIVITY_TIMEOUT_SECONDS, MAX_SESSION_SECONDS)
+             HEARTBEAT_TIMEOUT_SECONDS, SESSION_DURATION_SECONDS, EXTEND_SECONDS, MAX_SESSION_SECONDS)
     Thread(target=_reaper_loop, daemon=True).start()
     app.run(host=HOST, port=PORT)
