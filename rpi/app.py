@@ -302,6 +302,20 @@ def ui_toggle():
     return jsonify(ok=True, state=_state_payload())
 
 
+@app.post("/api/restart")
+def api_restart():
+    require_token()
+    source = _source_from_request("webhook")
+    log_event("container_restart_requested", source=source)
+
+    def _shutdown():
+        time.sleep(1)
+        os._exit(0)
+
+    Thread(target=_shutdown, daemon=True).start()
+    return jsonify(ok=True, message="container restarting (Docker restart policy will bring it back up)")
+
+
 @app.get("/")
 def index():
     return render_template_string(DASHBOARD_HTML, device=DEVICE_NAME)

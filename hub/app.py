@@ -161,6 +161,22 @@ def api_toggle(hostname):
     return _call_rpi(find_rpi(hostname), "/ui/toggle", with_token=False)
 
 
+@app.post("/api/rpi/<hostname>/restart")
+def api_restart(hostname):
+    rpi = find_rpi(hostname)
+    try:
+        r = requests.post(
+            rpi_url(rpi, "/api/restart"),
+            headers={"Authorization": f"Bearer {rpi['token']}"},
+            json={"source": "hub"},
+            timeout=POLL_TIMEOUT,
+        )
+        r.raise_for_status()
+        return jsonify(ok=True, message=r.json().get("message"))
+    except requests.RequestException as e:
+        return jsonify(ok=False, error=str(e)), 502
+
+
 @app.get("/api/health")
 def api_health():
     return jsonify(ok=True, count=len(RPIS))
@@ -234,6 +250,8 @@ HUB_HTML = """<!doctype html>
   button.on:hover:not(:disabled) { background: #15803d; }
   button.off { background: #7f1d1d; }
   button.off:hover:not(:disabled) { background: #991b1b; }
+  button.restart { background: #78350f; }
+  button.restart:hover:not(:disabled) { background: #92400e; }
 
   details { font-size: .8rem; }
   details summary { cursor: pointer; color: var(--muted); padding: .3rem 0; user-select: none; }
@@ -423,6 +441,7 @@ function renderCard(d) {
         <button class="on" onclick="rpiCall('${d.hostname}','on',this)" ${reachable ? '' : 'disabled'}>ON</button>
         <button class="off" onclick="rpiCall('${d.hostname}','off',this)" ${reachable ? '' : 'disabled'}>OFF</button>
         <button onclick="rpiCall('${d.hostname}','toggle',this)" ${reachable ? '' : 'disabled'}>Toggle</button>
+        <button class="restart" onclick="confirmRestart('${d.hostname}','${escapeHtml(d.display_name)}',this)" ${reachable ? '' : 'disabled'} title="Restartovat kontejner (relé půjde na OFF)">↻</button>
       </div>
 
       <details data-id="device-${escapeHtml(d.hostname)}">
@@ -450,6 +469,22 @@ async function rpiCall(hostname, action, btn) {
   } finally {
     await refresh();
     btn.disabled = false;
+  }
+}
+
+async function confirmRestart(hostname, name, btn) {
+  if (!confirm(`Restartovat kontejner na "${name}"?\n\nRelé přejde do OFF a zařízení bude ~5–10 s nedostupné.`)) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch(`/api/rpi/${encodeURIComponent(hostname)}/restart`, { method: 'POST' });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      alert(`Chyba: ${err.error || r.statusText}`);
+    }
+  } catch (e) {
+    alert('Network error: ' + e);
+  } finally {
+    setTimeout(() => { btn.disabled = false; refresh(); }, 6000);
   }
 }
 

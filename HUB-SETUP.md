@@ -117,6 +117,7 @@ Auto-refresh 3 s.
 | POST   | `/api/rpi/<hostname>/on`          | Proxy na `/webhook/on` daného RPi (hub dosadí token)          |
 | POST   | `/api/rpi/<hostname>/off`         | Proxy na `/webhook/off`                                       |
 | POST   | `/api/rpi/<hostname>/toggle`      | Proxy na `/ui/toggle` (bez tokenu)                            |
+| POST   | `/api/rpi/<hostname>/restart`     | Proxy na `/api/restart` (s tokenem). Docker kontejner restartuje se. |
 
 Hub neřeší autentizaci návštěvníků dashboardu — spoléhá na to, že port 8080 je vystavený **jen přes tailnet**. Pokud by se někdy publikoval do internetu, přidat auth.
 
@@ -174,5 +175,6 @@ Docker kontejner neběží nebo spadl do restart loopu. `docker compose logs` uk
 
 ## Changelog
 
+- **2026-04-18** — Nové tlačítko restart (`↻`) s confirm dialogem. Proxy endpoint `POST /api/rpi/<hostname>/restart` volá RPi `/api/restart` s tokenem. Po kliku se tlačítka na chvíli zablokují, UI se refreshne za 6 s (doba znovunaběhnutí kontejneru).
 - **2026-04-18** — Karty ukazují health status (healthy / N issues / offline), polohu zařízení, metriky (internet, uptime, disk, CPU teplota, RAM, load) a rozbalitelné „Info o zařízení" (model, sériové č., host OS, kernel, public IP). Hub nově polluje `/api/status` a `/api/device` kromě `/api/state` a `/api/logs`. Při krátkém výpadku RPi se uchovává poslední známý stav device info, aby karta nezmizela.
 - **2026-04-18** — Počáteční verze hubu. Image `ghcr.io/michalvarys/trafika-hub`, YAML registry RPi, poll interval 3 s, grid UI s per-RPi kartami, proxy endpointy pro ON/OFF/Toggle.
