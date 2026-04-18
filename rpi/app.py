@@ -491,7 +491,7 @@ QR_HTML = """<!doctype html>
   .meta strong { color: var(--fg); font-variant-numeric: tabular-nums; }
   .warning { color: #fca5a5; font-size: .85rem; max-width: 30rem; text-align: center; }
 </style>
-<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+<script src="/static/qrcode.min.js"></script>
 </head>
 <body>
 <h1>Naskenuj pro nákup</h1>
