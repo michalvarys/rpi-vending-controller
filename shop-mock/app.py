@@ -24,12 +24,20 @@ if not SESSION_SECRET:
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8081"))
 
-# How long we wait without a heartbeat before dropping the session and, if it was the last one, turning the relay off.
+# How long we wait without a *liveness* heartbeat before dropping the session.
+# Liveness pings come automatically every ~10 s as long as the browser is alive,
+# so this catches: tab closed, crash, sleep, network drop.
 HEARTBEAT_TIMEOUT_SECONDS = int(os.environ.get("HEARTBEAT_TIMEOUT_SECONDS", "30"))
+# How long we wait without any *user activity* (mouse / key / touch / scroll)
+# before dropping the session even if the browser is still pinging. Catches:
+# user walked away from the machine but tab stayed open.
+ACTIVITY_TIMEOUT_SECONDS = int(os.environ.get("ACTIVITY_TIMEOUT_SECONDS", "180"))
 # Hard cap on a single session — relay always goes off at this point even if the browser keeps pinging.
 MAX_SESSION_SECONDS = int(os.environ.get("MAX_SESSION_SECONDS", "900"))
 # JS polling interval (sent to the template).
 HEARTBEAT_CLIENT_INTERVAL_MS = 10_000
+# Debounce window on activity pings — at most one per N ms even if user types continuously.
+ACTIVITY_DEBOUNCE_MS = 5_000
 
 # Hardcoded mock users. Real impl will use Odoo/external identity.
 USERS = {
@@ -93,20 +101,24 @@ def _register_presence(user_id):
         existing = _active.get(sid)
         _active[sid] = {
             "user_id": user_id,
-            "last_ping": now,
+            "last_alive": now,
+            "last_activity": now,
             "started_at": existing["started_at"] if existing else now,
         }
 
 
-def _refresh_presence():
+def _refresh_presence(kind="alive"):
     sid = session.get("sid")
     if not sid:
         return False
+    now = time.time()
     with _active_lock:
         entry = _active.get(sid)
         if not entry:
             return False
-        entry["last_ping"] = time.time()
+        entry["last_alive"] = now
+        if kind == "activity":
+            entry["last_activity"] = now
     return True
 
 
@@ -130,13 +142,18 @@ def _reaper_loop():
         expired = []
         with _active_lock:
             for sid, entry in list(_active.items()):
-                idle = now - entry["last_ping"]
+                liveness_idle = now - entry["last_alive"]
+                activity_idle = now - entry["last_activity"]
                 age = now - entry["started_at"]
-                if idle > HEARTBEAT_TIMEOUT_SECONDS:
-                    expired.append((sid, "idle", entry["user_id"]))
-                    _active.pop(sid, None)
+                reason = None
+                if liveness_idle > HEARTBEAT_TIMEOUT_SECONDS:
+                    reason = "disconnected"
+                elif activity_idle > ACTIVITY_TIMEOUT_SECONDS:
+                    reason = "user_idle"
                 elif age > MAX_SESSION_SECONDS:
-                    expired.append((sid, "max_age", entry["user_id"]))
+                    reason = "max_age"
+                if reason:
+                    expired.append((sid, reason, entry["user_id"]))
                     _active.pop(sid, None)
             remaining = len(_active)
         for sid, reason, user_id in expired:
@@ -196,7 +213,8 @@ def logout():
 
 @app.post("/session/heartbeat")
 def session_heartbeat():
-    if _refresh_presence():
+    kind = request.args.get("kind", "alive")
+    if _refresh_presence(kind=kind):
         return jsonify(ok=True), 200
     return jsonify(ok=False, reason="no active session"), 410
 
@@ -232,6 +250,8 @@ def home():
                                   rpi_hostname=RPI_HOSTNAME,
                                   heartbeat_ms=HEARTBEAT_CLIENT_INTERVAL_MS,
                                   heartbeat_timeout=HEARTBEAT_TIMEOUT_SECONDS,
+                                  activity_timeout=ACTIVITY_TIMEOUT_SECONDS,
+                                  activity_debounce_ms=ACTIVITY_DEBOUNCE_MS,
                                   max_session_seconds=MAX_SESSION_SECONDS)
 
 
@@ -411,8 +431,9 @@ HOME_HTML = """<!doctype html>
 
   <div class="card">
     <div class="muted" style="margin-bottom:.8rem">
-      Automat se vypne automaticky při zavření prohlížeče, nečinnosti ({{ heartbeat_timeout }} s)
-      nebo po {{ (max_session_seconds / 60) | int }} minutách.
+      Automat se vypne při zavření prohlížeče, ztrátě spojení ({{ heartbeat_timeout }} s),
+      <strong>nečinnosti uživatele ({{ (activity_timeout / 60) | round(1) }} min)</strong>,
+      nebo nejpozději po {{ (max_session_seconds / 60) | int }} min od přihlášení.
     </div>
     <form method="post" action="/logout" style="margin:0">
       <button class="secondary" type="submit">Odhlásit (automat se vypne)</button>
@@ -421,14 +442,33 @@ HOME_HTML = """<!doctype html>
 </main>
 <script>
 (function () {
-  const INTERVAL = {{ heartbeat_ms }};
-  function beat() {
-    fetch('/session/heartbeat', { method: 'POST', credentials: 'same-origin' })
+  const LIVENESS_INTERVAL = {{ heartbeat_ms }};
+  const ACTIVITY_DEBOUNCE = {{ activity_debounce_ms }};
+
+  function ping(kind) {
+    fetch('/session/heartbeat?kind=' + kind, { method: 'POST', credentials: 'same-origin' })
       .then(r => { if (r.status === 410) window.location.href = '/login'; })
       .catch(() => {});
   }
-  beat();
-  setInterval(beat, INTERVAL);
+
+  // Liveness — automatic, says "browser is alive". Catches tab close / disconnect.
+  ping('alive');
+  setInterval(() => ping('alive'), LIVENESS_INTERVAL);
+
+  // Activity — only on user interaction, debounced. Catches "user walked away".
+  let activityScheduled = false;
+  function noteActivity() {
+    if (activityScheduled) return;
+    activityScheduled = true;
+    setTimeout(() => { activityScheduled = false; ping('activity'); }, ACTIVITY_DEBOUNCE);
+  }
+  // Page load itself counts as activity
+  ping('activity');
+  ['mousedown', 'keydown', 'touchstart', 'scroll', 'mousemove'].forEach(ev => {
+    document.addEventListener(ev, noteActivity, { passive: true });
+  });
+
+  // Fast cleanup when the tab closes (sendBeacon fires reliably during unload)
   window.addEventListener('pagehide', () => {
     navigator.sendBeacon('/session/end');
   });
@@ -471,7 +511,8 @@ VERIFY_HTML = """<!doctype html>
 
 
 if __name__ == "__main__":
-    log.info("Starting shop-mock on %s:%s — hub=%s rpi=%s heartbeat_timeout=%ds max_session=%ds",
-             HOST, PORT, HUB_URL, RPI_HOSTNAME, HEARTBEAT_TIMEOUT_SECONDS, MAX_SESSION_SECONDS)
+    log.info("Starting shop-mock on %s:%s — hub=%s rpi=%s liveness=%ds activity=%ds max_session=%ds",
+             HOST, PORT, HUB_URL, RPI_HOSTNAME,
+             HEARTBEAT_TIMEOUT_SECONDS, ACTIVITY_TIMEOUT_SECONDS, MAX_SESSION_SECONDS)
     Thread(target=_reaper_loop, daemon=True).start()
     app.run(host=HOST, port=PORT)
