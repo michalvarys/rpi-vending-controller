@@ -8,8 +8,11 @@ services:
     environment:
       WEBHOOK_TOKEN: ${WEBHOOK_TOKEN:?WEBHOOK_TOKEN is required — set it in .env}
       DEVICE_NAME: ${DEVICE_NAME:-}
+      LOCATION: ${LOCATION:-}
     volumes:
       - ./data:/data
+      - /etc/os-release:/etc/host-os-release:ro
+      - /etc/hostname:/etc/host-hostname:ro
     # Uncomment once real GPIO is wired up:
     # devices:
     #   - "/dev/gpiomem:/dev/gpiomem"

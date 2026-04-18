@@ -23,6 +23,7 @@ set -euo pipefail
 : "${TS_HOSTNAME:=}"
 : "${DEVICE_NAME:=}"
 : "${DISPLAY_NAME:=}"
+: "${LOCATION:=}"
 : "${WEBHOOK_TOKEN:=}"
 : "${TAILSCALE_AUTH_KEY:=}"
 : "${PORT:=8080}"
@@ -113,9 +114,10 @@ else
   fi
 fi
 
-# --- 7. Config: DEVICE_NAME, DISPLAY_NAME, token ---
+# --- 7. Config: DEVICE_NAME, DISPLAY_NAME, LOCATION, token ---
 DEVICE_NAME="${DEVICE_NAME:-$TS_HOSTNAME}"
 DISPLAY_NAME="${DISPLAY_NAME:-$DEVICE_NAME}"
+prompt LOCATION "" "Poloha (např. 'Praha, Vinohrady' — lze nechat prázdné)"
 
 if [[ -z "$WEBHOOK_TOKEN" ]]; then
   WEBHOOK_TOKEN=$(openssl rand -base64 32 | tr -d '=+/' | cut -c1-43)
@@ -132,6 +134,7 @@ curl -fsSL "$REPO_RAW/rpi/docker-compose.yml" -o "$INSTALL_DIR/docker-compose.ym
 cat > "$INSTALL_DIR/.env" <<ENVFILE
 WEBHOOK_TOKEN=$WEBHOOK_TOKEN
 DEVICE_NAME=$DEVICE_NAME
+LOCATION=$LOCATION
 PORT=$PORT
 ENVFILE
 chmod 600 "$INSTALL_DIR/.env"

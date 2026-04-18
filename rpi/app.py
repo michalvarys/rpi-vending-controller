@@ -1,11 +1,15 @@
 """Trafika vending controller — webhook receiver + live dashboard (env-configured)."""
 import json
 import os
+import re
+import shutil
 import socket
 import sys
+import time
+import urllib.request
 from datetime import datetime
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 
 from flask import Flask, abort, jsonify, render_template_string, request
 
@@ -17,14 +21,20 @@ if not WEBHOOK_TOKEN:
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
 DEVICE_NAME = os.environ.get("DEVICE_NAME", socket.gethostname())
+LOCATION = os.environ.get("LOCATION", "").strip()
 DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parent))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = DATA_DIR / "events.log"
+
+START_TIME = time.time()
 
 app = Flask(__name__)
 
 _state = {"relay": "OFF", "changed_at": None, "changed_by": None}
 _state_lock = Lock()
+
+_health = {"internet_ok": False, "internet_checked_at": None, "public_ip": None, "public_ip_checked_at": None}
+_health_lock = Lock()
 
 
 def log_event(event, source="", note=""):
@@ -80,6 +90,116 @@ def _state_payload():
     return {**_state, "device": DEVICE_NAME}
 
 
+# ----- Device / status helpers -----
+
+def _read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip().rstrip("\x00")
+    except OSError:
+        return None
+
+
+def _cpuinfo_field(name):
+    data = _read("/proc/cpuinfo") or ""
+    for line in data.splitlines():
+        if line.startswith(name):
+            parts = line.split(":", 1)
+            if len(parts) == 2:
+                return parts[1].strip()
+    return None
+
+
+def _cpu_temp_c():
+    raw = _read("/sys/class/thermal/thermal_zone0/temp")
+    try:
+        return round(int(raw) / 1000.0, 1) if raw else None
+    except ValueError:
+        return None
+
+
+def _memory():
+    data = _read("/proc/meminfo") or ""
+    total_kb = avail_kb = None
+    for line in data.splitlines():
+        if line.startswith("MemTotal:"):
+            total_kb = int(line.split()[1])
+        elif line.startswith("MemAvailable:"):
+            avail_kb = int(line.split()[1])
+    if total_kb and avail_kb is not None:
+        used_pct = round((total_kb - avail_kb) / total_kb * 100, 1)
+        return total_kb // 1024, used_pct
+    return None, None
+
+
+def _load_1m():
+    data = _read("/proc/loadavg")
+    try:
+        return float(data.split()[0]) if data else None
+    except (ValueError, IndexError):
+        return None
+
+
+def _host_os():
+    for candidate in ("/etc/host-os-release", "/etc/os-release"):
+        data = _read(candidate)
+        if not data:
+            continue
+        m = re.search(r'^PRETTY_NAME="?([^"\n]+?)"?\s*$', data, re.MULTILINE)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _host_hostname():
+    return _read("/etc/host-hostname") or socket.gethostname()
+
+
+def _check_internet():
+    try:
+        s = socket.create_connection(("1.1.1.1", 53), timeout=3)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def _fetch_public_ip():
+    try:
+        req = urllib.request.Request(
+            "https://api.ipify.org?format=text",
+            headers={"User-Agent": "trafika-rpi"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            ip = r.read().decode().strip()
+        if re.fullmatch(r"[\d.]+|[\da-fA-F:]+", ip):
+            return ip
+    except Exception:
+        pass
+    return None
+
+
+def _internet_poller():
+    while True:
+        ok = _check_internet()
+        with _health_lock:
+            _health["internet_ok"] = ok
+            _health["internet_checked_at"] = datetime.now().isoformat(timespec="seconds")
+        time.sleep(30)
+
+
+def _public_ip_poller():
+    while True:
+        ip = _fetch_public_ip()
+        with _health_lock:
+            if ip:
+                _health["public_ip"] = ip
+            _health["public_ip_checked_at"] = datetime.now().isoformat(timespec="seconds")
+        time.sleep(3600)
+
+
+# ----- Webhook endpoints -----
+
 @app.post("/webhook/on")
 def webhook_on():
     require_token()
@@ -94,6 +214,8 @@ def webhook_off():
     return jsonify(ok=True, state=_state_payload())
 
 
+# ----- Read endpoints -----
+
 @app.get("/api/state")
 def api_state():
     return jsonify(_state_payload())
@@ -107,6 +229,70 @@ def api_logs():
 @app.get("/api/health")
 def api_health():
     return jsonify(ok=True, device=DEVICE_NAME)
+
+
+@app.get("/api/status")
+def api_status():
+    issues = []
+
+    disk = shutil.disk_usage("/")
+    disk_free_mb = disk.free // (1024 * 1024)
+    disk_total_mb = disk.total // (1024 * 1024)
+    disk_free_pct = round(disk.free / disk.total * 100, 1)
+    if disk_free_pct < 10:
+        issues.append("low-disk")
+
+    cpu_temp = _cpu_temp_c()
+    if cpu_temp is not None and cpu_temp > 80:
+        issues.append("high-temp")
+
+    mem_total_mb, mem_used_pct = _memory()
+    if mem_used_pct is not None and mem_used_pct > 90:
+        issues.append("high-memory")
+
+    with _health_lock:
+        internet_ok = _health["internet_ok"]
+        internet_checked_at = _health["internet_checked_at"]
+    if internet_checked_at and not internet_ok:
+        issues.append("no-internet")
+
+    return jsonify({
+        "ok": not issues,
+        "device": DEVICE_NAME,
+        "uptime_seconds": int(time.time() - START_TIME),
+        "internet": internet_ok,
+        "internet_checked_at": internet_checked_at,
+        "disk_free_mb": disk_free_mb,
+        "disk_total_mb": disk_total_mb,
+        "disk_free_pct": disk_free_pct,
+        "cpu_temp_c": cpu_temp,
+        "memory_used_pct": mem_used_pct,
+        "load_avg_1m": _load_1m(),
+        "issues": issues,
+    })
+
+
+@app.get("/api/device")
+def api_device():
+    mem_total_mb, _ = _memory()
+    with _health_lock:
+        public_ip = _health["public_ip"]
+        public_ip_checked_at = _health["public_ip_checked_at"]
+    uname = os.uname()
+    return jsonify({
+        "device": DEVICE_NAME,
+        "location": LOCATION or None,
+        "hostname": _host_hostname(),
+        "model": _cpuinfo_field("Model"),
+        "serial": _cpuinfo_field("Serial"),
+        "hw_revision": _cpuinfo_field("Revision"),
+        "os": _host_os(),
+        "kernel": uname.release,
+        "arch": uname.machine,
+        "memory_total_mb": mem_total_mb,
+        "public_ip": public_ip,
+        "public_ip_checked_at": public_ip_checked_at,
+    })
 
 
 @app.post("/ui/toggle")
@@ -208,5 +394,7 @@ setInterval(refresh, 2000);
 
 
 if __name__ == "__main__":
-    log_event("service_start", source="system", note=f"device={DEVICE_NAME} default_state={_state['relay']}")
+    log_event("service_start", source="system", note=f"device={DEVICE_NAME} default_state={_state['relay']} location={LOCATION or '-'}")
+    Thread(target=_internet_poller, daemon=True).start()
+    Thread(target=_public_ip_poller, daemon=True).start()
     app.run(host=HOST, port=PORT)
