@@ -12,11 +12,10 @@ from flask import Flask, jsonify, redirect, render_template_string, request, ses
 from threading import Timer
 
 HUB_URL = os.environ.get("HUB_URL", "http://127.0.0.1:8080").rstrip("/")
-# Default RPi for direct logins (no QR). QR activations override per-session.
+# Optional fallback for admin logins without a QR. Customers (verified/unverified)
+# always need a QR-sourced pinned_rpi — knowing which machine to power on must come
+# from the physical QR scan, not from shop config.
 DEFAULT_RPI_HOSTNAME = os.environ.get("RPI_HOSTNAME", "").strip()
-if not DEFAULT_RPI_HOSTNAME:
-    print("FATAL: RPI_HOSTNAME env var is required (default target for non-QR logins)", file=sys.stderr)
-    sys.exit(1)
 
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "").strip()
 if not SESSION_SECRET:
@@ -248,9 +247,10 @@ def _reaper_loop():
 
 
 def session_rpi():
-    """Which RPi this browser session is driving. QR-based activation pins it in the session;
-    otherwise fall back to the shop's configured default."""
-    return session.get("pinned_rpi") or DEFAULT_RPI_HOSTNAME
+    """Which RPi this browser session is driving. QR activation pins it; admin
+    sessions may fall back to DEFAULT_RPI_HOSTNAME if configured. Returns None
+    when neither is available (caller must handle)."""
+    return session.get("pinned_rpi") or DEFAULT_RPI_HOSTNAME or None
 
 
 def hub_post(path, rpi_hostname=None):
@@ -316,8 +316,10 @@ def do_login():
     user = USERS.get(username)
     if not user or user["password"] != password:
         return redirect(url_for("login", error="bad_credentials"))
-    # Preserve pinned_rpi (QR activation) across session reset
     pinned = session.get("pinned_rpi")
+    # Customers must arrive via QR. Only admin may log in without a pinned RPi.
+    if not pinned and user["role"] != "admin":
+        return redirect(url_for("login", error="qr_required"))
     session.clear()
     session["user_id"] = username
     if pinned:
@@ -367,6 +369,11 @@ def home():
 
     if user["role"] == "unverified" and not session.get("verified_flag"):
         return redirect(url_for("verify"))
+
+    # Admin may have logged in without pinning a specific RPi — show an info page
+    # instead of blindly targeting a machine.
+    if user["role"] == "admin" and not session_rpi():
+        return render_template_string(ADMIN_NO_RPI_HTML, user=user, hub_url=HUB_URL)
 
     _register_presence(user["id"], user["role"])
     view = _current_session_view() or {"timer_disabled": False, "expires_in": 0, "max_remaining": 0, "at_max": False}
@@ -501,7 +508,9 @@ LOGIN_HTML = """<!doctype html>
     {% if pinned_rpi %}<div style="background:rgba(96,165,250,.15);color:var(--accent);padding:.6rem .9rem;border-radius:.5rem;margin-bottom:1rem;font-size:.9rem">
       Aktivace přes QR pro <strong>{{ pinned_rpi }}</strong>. Po přihlášení se automat zapne.
     </div>{% endif %}
-    {% if error %}<div class="error">Špatné uživatelské jméno nebo heslo.</div>{% endif %}
+    {% if error == 'bad_credentials' %}<div class="error">Špatné uživatelské jméno nebo heslo.</div>
+    {% elif error == 'qr_required' %}<div class="error">Pro přihlášení naskenuj QR kód u automatu.<br><span class="muted" style="font-size:.8rem">Bez QR neví server, který automat zapnout.</span></div>
+    {% elif error %}<div class="error">Nepovedlo se přihlásit.</div>{% endif %}
     <form method="post" action="/login">
       <label for="u">Uživatel</label>
       <input id="u" name="username" autocomplete="username" autofocus>
@@ -678,6 +687,36 @@ HOME_HTML = """<!doctype html>
 </body>
 </html>
 """
+
+ADMIN_NO_RPI_HTML = """<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<title>Admin — Trafika</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>""" + BASE_CSS + """</style>
+</head>
+<body>
+<main>
+  <h1>Ahoj, {{ user.display }}</h1>
+  <div class="tag"><span class="badge admin">admin</span></div>
+
+  <div class="card">
+    <p>Přihlásil ses jako admin, ale nejsi napárovaný s konkrétním automatem — neproběhla QR aktivace a `RPI_HOSTNAME` v shop-mock `.env` není nastavený.</p>
+    <p class="muted">Pro správu všech zařízení použij hub dashboard. Zde v shop-mocku se dá nasimulovat „zákaznické" přihlášení jen po naskenování QR konkrétního automatu.</p>
+    <a href="{{ hub_url }}/" class="full" style="display:block;text-align:center;padding:.8rem;background:var(--accent);color:#0b1a2e;border-radius:.5rem;text-decoration:none;font-weight:600;margin-top:1rem">Otevřít hub dashboard ↗</a>
+  </div>
+
+  <div class="card">
+    <form method="post" action="/logout" style="margin:0">
+      <button class="secondary" type="submit">Odhlásit</button>
+    </form>
+  </div>
+</main>
+</body>
+</html>
+"""
+
 
 QR_ERROR_HTML = """<!doctype html>
 <html lang="cs">

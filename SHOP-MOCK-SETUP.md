@@ -65,11 +65,13 @@ Shop-mock používá `network_mode: host` — poslouchá přímo na hostovém po
 
 Otevři `http://varyshop-trafika-vps:8081/` v prohlížeči. Login vidí tři testovací účty (`admin/admin`, `verified/verified`, `unverified/unverified`) s tlačítky pro vyplnění.
 
-| Účet         | Po přihlášení                                              |
-|--------------|------------------------------------------------------------|
-| `admin`      | Dashboard s aktuálním stavem relé + ruční Zapnout / Vypnout |
-| `verified`   | Relé se okamžitě zapne, stránka ukáže „Automat BĚŽÍ"        |
-| `unverified` | Ověřovací obrazovka (mock) → po kliku na „Ověřit" se chová jako verified |
+| Účet         | Přihlášení bez QR              | Po přihlášení s QR                                              |
+|--------------|--------------------------------|------------------------------------------------------------------|
+| `admin`      | Info page (link na hub)        | Dashboard daného RPi + ruční Zapnout / Vypnout                  |
+| `verified`   | **Blokováno** — „Naskenuj QR" | Relé se okamžitě zapne, stránka ukáže „Automat BĚŽÍ"            |
+| `unverified` | **Blokováno** — „Naskenuj QR" | Ověřovací obrazovka → po „Ověřit" se chová jako verified        |
+
+Zákazník **nemůže přihlásit bez QR** — shop bez tokenu nemůže vědět, který automat spustit. Admin může ale neuvidí žádný konkrétní automat (redirect na hub pro správu).
 
 Odhlášení (`Odhlásit`) na všech kartách volá hub `/off` pro navázaný RPi, takže po skončení sezení automat zůstane vypnutý.
 
@@ -159,6 +161,7 @@ Tento `/activate/<rpi>/<token>` routing musí v Odoo modulu přibýt jako vlastn
 
 ## Changelog
 
+- **2026-04-18** — **Bez QR se nepřihlásíš.** Customer login (verified/unverified) vyžaduje `session["pinned_rpi"]` — ten se nastaví jen přes `/activate/<rpi>/<token>`. Přímý /login bez QR teď vrací „Pro přihlášení naskenuj QR kód". Admin si může přihlásit bez QR, ale dostane info page s odkazem na hub (místo aby zapnul nějaký default RPi). `RPI_HOSTNAME` už není povinné; ze stejného důvodu je nový env var odznačený jako optional fallback pro admin.
 - **2026-04-18** — QR aktivační flow. `GET /activate/<rpi>/<token>` validuje přes hub, pinne RPi do session, provede uživatele loginem. Po loginu home volá hub `/on` pro pinned RPi místo hardcoded defaultu. Ze shop-mocku `RPI_HOSTNAME` se stal `DEFAULT_RPI_HOSTNAME` — používá se jen pro login bez QR (testovací nebo admin).
 - **2026-04-18** — Admin session je bez odpočtu. Admin karta v UI neobsahuje countdown ani Extend tlačítko; `expires_at = ∞`, reaper nikdy neexpiruje admina podle timeru. Liveness timeout (30 s bez heartbeatu) pořád platí.
 - **2026-04-18** — Defaulty timeru zkráceny: `SESSION_DURATION_SECONDS=60` (z 180), `EXTEND_SECONDS=30` (z 180). Hard cap zachován (900 s). Vending UX: kratší kus „kreditu" + drobnější extends je realističtější pro krátký nákup.

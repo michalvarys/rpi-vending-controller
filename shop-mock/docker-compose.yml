@@ -7,7 +7,7 @@ services:
     environment:
       PORT: ${PORT:-8081}
       HUB_URL: ${HUB_URL:-http://127.0.0.1:8080}
-      RPI_HOSTNAME: ${RPI_HOSTNAME:?RPI_HOSTNAME is required — set it in .env}
+      RPI_HOSTNAME: ${RPI_HOSTNAME:-}
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required — set it in .env}
       HEARTBEAT_TIMEOUT_SECONDS: ${HEARTBEAT_TIMEOUT_SECONDS:-30}
       SESSION_DURATION_SECONDS: ${SESSION_DURATION_SECONDS:-60}
