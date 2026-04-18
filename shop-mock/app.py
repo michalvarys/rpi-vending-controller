@@ -735,7 +735,7 @@ VERIFY_HTML = """<!doctype html>
 
 if __name__ == "__main__":
     log.info("Starting shop-mock on %s:%s — hub=%s rpi=%s liveness=%ds session=%ds extend=%ds max=%ds",
-             HOST, PORT, HUB_URL, RPI_HOSTNAME,
+             HOST, PORT, HUB_URL, DEFAULT_RPI_HOSTNAME,
              HEARTBEAT_TIMEOUT_SECONDS, SESSION_DURATION_SECONDS, EXTEND_SECONDS, MAX_SESSION_SECONDS)
     Thread(target=_reaper_loop, daemon=True).start()
     app.run(host=HOST, port=PORT)
