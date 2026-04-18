@@ -7,6 +7,7 @@ on:
     paths:
       - 'rpi/**'
       - 'hub/**'
+      - 'shop-mock/**'
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
@@ -25,6 +26,9 @@ jobs:
           - name: hub
             context: ./hub
             image: ghcr.io/michalvarys/trafika-hub
+          - name: shop-mock
+            context: ./shop-mock
+            image: ghcr.io/michalvarys/trafika-shop-mock
 
     steps:
       - uses: actions/checkout@v4

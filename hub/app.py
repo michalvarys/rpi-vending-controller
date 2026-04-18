@@ -441,7 +441,7 @@ function renderCard(d) {
         <button class="on" onclick="rpiCall('${d.hostname}','on',this)" ${reachable ? '' : 'disabled'}>ON</button>
         <button class="off" onclick="rpiCall('${d.hostname}','off',this)" ${reachable ? '' : 'disabled'}>OFF</button>
         <button onclick="rpiCall('${d.hostname}','toggle',this)" ${reachable ? '' : 'disabled'}>Toggle</button>
-        <button class="restart" onclick="confirmRestart('${d.hostname}','${escapeHtml(d.display_name)}',this)" ${reachable ? '' : 'disabled'} title="Restartovat kontejner (relé půjde na OFF)">↻</button>
+        <button class="restart" onclick="confirmRestart('${d.hostname}','${escapeHtml(d.display_name)}',this)" ${reachable ? '' : 'disabled'} title="Restartovat celé RPi (reboot ~30-60 s)">↻</button>
       </div>
 
       <details data-id="device-${escapeHtml(d.hostname)}">
@@ -473,7 +473,7 @@ async function rpiCall(hostname, action, btn) {
 }
 
 async function confirmRestart(hostname, name, btn) {
-  if (!confirm(`Restartovat kontejner na "${name}"?\n\nRelé přejde do OFF a zařízení bude ~5–10 s nedostupné.`)) return;
+  if (!confirm(`Restartovat zařízení "${name}"?\n\nCelé RPi se restartuje — bude ~30-60 s nedostupné, relé zůstane OFF.`)) return;
   btn.disabled = true;
   try {
     const r = await fetch(`/api/rpi/${encodeURIComponent(hostname)}/restart`, { method: 'POST' });
@@ -484,7 +484,7 @@ async function confirmRestart(hostname, name, btn) {
   } catch (e) {
     alert('Network error: ' + e);
   } finally {
-    setTimeout(() => { btn.disabled = false; refresh(); }, 6000);
+    setTimeout(() => { btn.disabled = false; refresh(); }, 15000);
   }
 }
 

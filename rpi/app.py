@@ -1,4 +1,5 @@
 """Trafika vending controller — webhook receiver + live dashboard (env-configured)."""
+import ctypes
 import json
 import os
 import re
@@ -302,18 +303,31 @@ def ui_toggle():
     return jsonify(ok=True, state=_state_payload())
 
 
+_LINUX_REBOOT_MAGIC1 = 0xfee1dead
+_LINUX_REBOOT_MAGIC2 = 672274793
+_LINUX_REBOOT_CMD_RESTART = 0x01234567
+
+
+def _host_reboot():
+    time.sleep(1)
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.reboot(_LINUX_REBOOT_MAGIC1, _LINUX_REBOOT_MAGIC2, _LINUX_REBOOT_CMD_RESTART, None)
+    except OSError:
+        pass
+    # If the syscall returns, CAP_SYS_BOOT is missing — fall back to container restart
+    # so at least _something_ recovers.
+    errno = ctypes.get_errno()
+    log_event("host_reboot_failed", source="system", note=f"errno={errno}, falling back to container exit")
+    os._exit(0)
+
+
 @app.post("/api/restart")
 def api_restart():
     require_token()
-    source = _source_from_request("webhook")
-    log_event("container_restart_requested", source=source)
-
-    def _shutdown():
-        time.sleep(1)
-        os._exit(0)
-
-    Thread(target=_shutdown, daemon=True).start()
-    return jsonify(ok=True, message="container restarting (Docker restart policy will bring it back up)")
+    log_event("host_reboot_requested", source=_source_from_request("webhook"))
+    Thread(target=_host_reboot, daemon=True).start()
+    return jsonify(ok=True, message="host reboot initiated (~30-60 s)")
 
 
 @app.get("/")

@@ -13,6 +13,8 @@ services:
       - ./data:/data
       - /etc/os-release:/etc/host-os-release:ro
       - /etc/hostname:/etc/host-hostname:ro
+    cap_add:
+      - SYS_BOOT   # allows /api/restart to reboot the host RPi, not just the container
     # Uncomment once real GPIO is wired up:
     # devices:
     #   - "/dev/gpiomem:/dev/gpiomem"

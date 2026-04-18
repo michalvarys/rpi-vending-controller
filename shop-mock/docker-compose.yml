@@ -1,0 +1,11 @@
+services:
+  trafika-shop-mock:
+    image: ghcr.io/michalvarys/trafika-shop-mock:latest
+    container_name: trafika-shop-mock
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      PORT: ${PORT:-8081}
+      HUB_URL: ${HUB_URL:-http://127.0.0.1:8080}
+      RPI_HOSTNAME: ${RPI_HOSTNAME:?RPI_HOSTNAME is required — set it in .env}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required — set it in .env}

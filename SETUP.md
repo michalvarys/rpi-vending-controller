@@ -236,7 +236,7 @@ Nové RPi se objeví v gridu na hub dashboardu (obvykle do ~3 s).
 | POST   | `/ui/toggle`   | ne    | Přepnutí z dashboardu / z hub toggle tlačítka                      |
 | POST   | `/webhook/on`  | token | Externí signál ON (z Odoo, z hub ON tlačítka)                      |
 | POST   | `/webhook/off` | token | Externí signál OFF                                                 |
-| POST   | `/api/restart` | token | Restart kontejneru (`os._exit(0)` + Docker restart policy)         |
+| POST   | `/api/restart` | token | **Reboot celého hosta (RPi)** přes `reboot(2)` syscall. Nedostupné ~30-60 s. Fallback na restart kontejneru, když chybí CAP_SYS_BOOT. |
 
 **Issue flags** (v `/api/status.issues[]`, používá hub pro „needs repair" badge):
 - `no-internet` — RPi nedosáhne na 1.1.1.1 (DNS port 53). Pozn.: tailnet může pořád fungovat.
@@ -346,6 +346,7 @@ Udržuj tento seznam — když se něco dotáhne, přesuň do Changelogu níž a
 
 ## Changelog
 
+- **2026-04-18** — `/api/restart` nyní **rebootuje celé RPi** (ne jen kontejner). Používá `reboot(2)` syscall přes ctypes; compose nově přidává `cap_add: [SYS_BOOT]`. Při chybějící capability se degraduje na restart kontejneru. UI tooltip a confirm dialog v hubu aktualizované.
 - **2026-04-18** — Remote restart. Nový endpoint `POST /api/restart` (token-protected) — zaloguje událost, odpoví 200, po 1 s zavolá `os._exit(0)`. Docker `restart: unless-stopped` kontejner pustí znovu; relé přejde do defaultního OFF. V hub UI nové tlačítko `↻` s confirm dialogem.
 - **2026-04-18** — Reporting stavu a HW info. Přidány `/api/status` (uptime, internet ping, disk, teplota, RAM, load, issue flags) a `/api/device` (model, sériové č., host OS, kernel, public IP, LOCATION z env). Compose bind-mountuje `/etc/os-release` a `/etc/hostname` z hostu. Přibyla `LOCATION` env proměnná (volitelná). Hub grid karty ukazují health badge, metriky a „Info o zařízení". `install.sh` se ptá na polohu.
 - **2026-04-18** — Přidán `scripts/install.sh` — jeden-liner instalace pro čisté RPi (apt, Docker, Tailscale, compose, start, tisk YAML bloku pro hub). Idempotentní.

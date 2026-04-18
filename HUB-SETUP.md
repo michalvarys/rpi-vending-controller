@@ -117,7 +117,7 @@ Auto-refresh 3 s.
 | POST   | `/api/rpi/<hostname>/on`          | Proxy na `/webhook/on` daného RPi (hub dosadí token)          |
 | POST   | `/api/rpi/<hostname>/off`         | Proxy na `/webhook/off`                                       |
 | POST   | `/api/rpi/<hostname>/toggle`      | Proxy na `/ui/toggle` (bez tokenu)                            |
-| POST   | `/api/rpi/<hostname>/restart`     | Proxy na `/api/restart` (s tokenem). Docker kontejner restartuje se. |
+| POST   | `/api/rpi/<hostname>/restart`     | Proxy na `/api/restart` (s tokenem). **Rebootuje celé RPi**, ~30-60 s nedostupné. |
 
 Hub neřeší autentizaci návštěvníků dashboardu — spoléhá na to, že port 8080 je vystavený **jen přes tailnet**. Pokud by se někdy publikoval do internetu, přidat auth.
 
