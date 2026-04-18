@@ -120,7 +120,8 @@ Po loginu uživatel dostane **viditelný countdown** (default 3 min). Když dojd
 
 Implementace:
 
-- Server drží `_active[sid] = {user_id, last_alive, expires_at, started_at}`.
+- Server drží `_active[sid] = {user_id, role, last_alive, expires_at, started_at}`.
+- **Admin výjimka:** admin session má `expires_at = ∞` a žádný countdown v UI. Stále platí liveness (tab close = off po 30 s). Admin je očekávaně „fully manual" — relé zůstává ON dokud explicitně nestiskne OFF nebo nezavře browser.
 - **Liveness ping** — `setInterval(ping, 10s)` v JS, server jen bumpuje `last_alive`.
 - **Extend** — `POST /session/extend` posune `expires_at` o `EXTEND_SECONDS` (cap na `started_at + MAX_SESSION_SECONDS`). UI immediately restartuje countdown.
 - **Reaper** — každé 2 s projde sessions: drop pokud `now - last_alive > HEARTBEAT_TIMEOUT_SECONDS` (reason `disconnected`) **nebo** `now > expires_at` (reason `timer_expired`). Při expiraci poslední session se zavolá hub `/off`.
@@ -140,6 +141,7 @@ Pozn.: dokud nemáme reálný GPIO signál z vending automatu (purchase / button
 
 ## Changelog
 
+- **2026-04-18** — Admin session je bez odpočtu. Admin karta v UI neobsahuje countdown ani Extend tlačítko; `expires_at = ∞`, reaper nikdy neexpiruje admina podle timeru. Liveness timeout (30 s bez heartbeatu) pořád platí.
 - **2026-04-18** — Defaulty timeru zkráceny: `SESSION_DURATION_SECONDS=60` (z 180), `EXTEND_SECONDS=30` (z 180). Hard cap zachován (900 s). Vending UX: kratší kus „kreditu" + drobnější extends je realističtější pro krátký nákup.
 - **2026-04-18** — Nahrazena activity-based idle detekce **viditelným countdown timerem** + tlačítkem Prodloužit. Defaultně 3 min od loginu, +3 min za click, max 15 min. Activity tracking (mouse / key / scroll listener) odstraněn — uživatel teď čas řídí explicitně. Liveness heartbeat zachovaný pro disconnect detection. Nové env vars `SESSION_DURATION_SECONDS` a `EXTEND_SECONDS`; `ACTIVITY_TIMEOUT_SECONDS` zrušen.
 - **2026-04-18** — Activity-based idle timeout. Heartbeat se rozpadl na liveness (auto, každých 10 s, timeout 30 s) a activity (debounced user interakce, timeout 180 s = 3 min). Reaper kontroluje obě osy + hard cap MAX_SESSION_SECONDS. Nový env var `ACTIVITY_TIMEOUT_SECONDS`.

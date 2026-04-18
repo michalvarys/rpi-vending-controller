@@ -93,21 +93,25 @@ def _ensure_sid():
     return sid
 
 
-def _register_presence(user_id):
+def _register_presence(user_id, role=""):
     sid = _ensure_sid()
     now = time.time()
     with _active_lock:
         existing = _active.get(sid)
         started = existing["started_at"] if existing else now
-        max_expires = started + MAX_SESSION_SECONDS
-        # Initial timer: SESSION_DURATION_SECONDS, but never beyond the hard cap.
-        # On re-register (page reload mid-session), keep whatever expires_at we already have.
-        if existing and existing.get("expires_at"):
-            expires_at = existing["expires_at"]
+        if role == "admin":
+            # Admin has no countdown timer — only liveness (tab close) still applies.
+            expires_at = float("inf")
         else:
-            expires_at = min(now + SESSION_DURATION_SECONDS, max_expires)
+            max_expires = started + MAX_SESSION_SECONDS
+            # On re-register (page reload mid-session) keep whatever expires_at we already have.
+            if existing and existing.get("expires_at") not in (None, float("inf")):
+                expires_at = existing["expires_at"]
+            else:
+                expires_at = min(now + SESSION_DURATION_SECONDS, max_expires)
         _active[sid] = {
             "user_id": user_id,
+            "role": role,
             "last_alive": now,
             "expires_at": expires_at,
             "started_at": started,
@@ -135,6 +139,9 @@ def _extend_session():
         entry = _active.get(sid)
         if not entry:
             return None
+        if entry.get("role") == "admin":
+            entry["last_alive"] = now
+            return _entry_view(entry, now)
         max_expires = entry["started_at"] + MAX_SESSION_SECONDS
         new_expires = min(entry["expires_at"] + EXTEND_SECONDS, max_expires)
         entry["expires_at"] = new_expires
@@ -145,8 +152,11 @@ def _extend_session():
 def _entry_view(entry, now=None):
     if now is None:
         now = time.time()
+    if entry.get("role") == "admin":
+        return {"timer_disabled": True, "expires_in": None, "max_remaining": None, "at_max": False}
     max_expires = entry["started_at"] + MAX_SESSION_SECONDS
     return {
+        "timer_disabled": False,
         "expires_in": max(0, int(round(entry["expires_at"] - now))),
         "max_remaining": max(0, int(round(max_expires - now))),
         "at_max": entry["expires_at"] >= max_expires - 0.5,
@@ -279,8 +289,8 @@ def home():
     if user["role"] == "unverified" and not session.get("verified_flag"):
         return redirect(url_for("verify"))
 
-    _register_presence(user["id"])
-    view = _current_session_view() or {"expires_in": 0, "max_remaining": 0, "at_max": False}
+    _register_presence(user["id"], user["role"])
+    view = _current_session_view() or {"timer_disabled": False, "expires_in": 0, "max_remaining": 0, "at_max": False}
 
     relay_error = None
     if user["role"] in ("verified", "unverified"):
@@ -298,9 +308,10 @@ def home():
                                   session_duration=SESSION_DURATION_SECONDS,
                                   extend_seconds=EXTEND_SECONDS,
                                   max_session_seconds=MAX_SESSION_SECONDS,
-                                  expires_in=view["expires_in"],
-                                  max_remaining=view["max_remaining"],
-                                  at_max=view["at_max"])
+                                  expires_in=view.get("expires_in") or 0,
+                                  max_remaining=view.get("max_remaining") or 0,
+                                  at_max=view.get("at_max", False),
+                                  timer_disabled=view.get("timer_disabled", False))
 
 
 @app.get("/verify")
@@ -483,6 +494,7 @@ HOME_HTML = """<!doctype html>
     {% endif %}
   </div>
 
+  {% if not timer_disabled %}
   <div class="card">
     <div class="timer" id="timer" data-expires-in="{{ expires_in }}" data-max-remaining="{{ max_remaining }}" data-at-max="{{ 'true' if at_max else 'false' }}">
       <div class="label">Čas do vypnutí</div>
@@ -490,13 +502,18 @@ HOME_HTML = """<!doctype html>
       <div class="max" id="timer-max"></div>
     </div>
     <button class="full ok" id="extend-btn" type="button" onclick="extendSession()">
-      Prodloužit o {{ (extend_seconds / 60) | int }} min
+      Prodloužit o {% if extend_seconds >= 60 %}{{ (extend_seconds / 60) | int }} min{% else %}{{ extend_seconds }} s{% endif %}
     </button>
   </div>
+  {% endif %}
 
   <div class="card">
     <div class="muted" style="margin-bottom:.8rem">
-      Automat se vypne při vypršení časovače, zavření prohlížeče, nebo nejpozději po {{ (max_session_seconds / 60) | int }} min od přihlášení.
+      {% if timer_disabled %}
+        <strong>Admin mode</strong> — žádný odpočet. Relé se vypne jen ručně nebo při zavření prohlížeče.
+      {% else %}
+        Automat se vypne při vypršení časovače, zavření prohlížeče, nebo nejpozději po {{ (max_session_seconds / 60) | int }} min od přihlášení.
+      {% endif %}
     </div>
     <form method="post" action="/logout" style="margin:0">
       <button class="secondary" type="submit">Odhlásit (automat se vypne)</button>
@@ -507,6 +524,20 @@ HOME_HTML = """<!doctype html>
 (function () {
   const LIVENESS_INTERVAL = {{ heartbeat_ms }};
   const timerEl = document.getElementById('timer');
+
+  // Liveness ping — always runs, catches tab close / disconnect even for admin.
+  function liveness() {
+    fetch('/session/heartbeat', { method: 'POST', credentials: 'same-origin' })
+      .then(r => { if (r.status === 410) window.location.href = '/login'; })
+      .catch(() => {});
+  }
+  liveness();
+  setInterval(liveness, LIVENESS_INTERVAL);
+  window.addEventListener('pagehide', () => navigator.sendBeacon('/session/end'));
+
+  // Timer + extend logic only runs if the timer card was rendered (non-admin sessions).
+  if (!timerEl) return;
+
   const valueEl = document.getElementById('timer-value');
   const maxEl = document.getElementById('timer-max');
   const extendBtn = document.getElementById('extend-btn');
@@ -536,7 +567,6 @@ HOME_HTML = """<!doctype html>
     if (maxRemaining > 0) maxRemaining -= 1;
     render();
     if (expiresIn <= 0) {
-      // Server reaper has likely already fired (or will within ~2s). Force-check.
       fetch('/session/heartbeat', { method: 'POST', credentials: 'same-origin' })
         .then(r => { if (r.status === 410) window.location.href = '/login'; });
     }
@@ -553,26 +583,13 @@ HOME_HTML = """<!doctype html>
       atMax = !!data.at_max;
       render();
     } catch (e) {
-      // restore enabled state if request failed
       render();
     }
   }
   window.extendSession = extendSession;
 
-  // Liveness ping (catches tab close / disconnect; orthogonal to the user-controlled timer)
-  function liveness() {
-    fetch('/session/heartbeat', { method: 'POST', credentials: 'same-origin' })
-      .then(r => { if (r.status === 410) window.location.href = '/login'; })
-      .catch(() => {});
-  }
-  liveness();
-  setInterval(liveness, LIVENESS_INTERVAL);
-
-  // Tick every second for the countdown display
   render();
   setInterval(tick, 1000);
-
-  window.addEventListener('pagehide', () => navigator.sendBeacon('/session/end'));
 })();
 </script>
 </body>
