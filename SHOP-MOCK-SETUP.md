@@ -113,8 +113,8 @@ Po loginu uživatel dostane **viditelný countdown** (default 3 min). Když dojd
 
 | Mechanismus | Co řeší | Default | Env var |
 |---|---|---|---|
-| **Countdown timer** | „Kolik času ti zbývá" | 180 s | `SESSION_DURATION_SECONDS` |
-| **Extend tlačítko** | Dobrovolné prodloužení | +180 s | `EXTEND_SECONDS` |
+| **Countdown timer** | „Kolik času ti zbývá" | 60 s | `SESSION_DURATION_SECONDS` |
+| **Extend tlačítko** | Dobrovolné prodloužení | +30 s | `EXTEND_SECONDS` |
 | **Liveness heartbeat** | Browser zavřený / crash / sleep | 30 s bez pingu | `HEARTBEAT_TIMEOUT_SECONDS` |
 | **Hard cap** | Maximální session | 15 min | `MAX_SESSION_SECONDS` |
 
@@ -140,6 +140,7 @@ Pozn.: dokud nemáme reálný GPIO signál z vending automatu (purchase / button
 
 ## Changelog
 
+- **2026-04-18** — Defaulty timeru zkráceny: `SESSION_DURATION_SECONDS=60` (z 180), `EXTEND_SECONDS=30` (z 180). Hard cap zachován (900 s). Vending UX: kratší kus „kreditu" + drobnější extends je realističtější pro krátký nákup.
 - **2026-04-18** — Nahrazena activity-based idle detekce **viditelným countdown timerem** + tlačítkem Prodloužit. Defaultně 3 min od loginu, +3 min za click, max 15 min. Activity tracking (mouse / key / scroll listener) odstraněn — uživatel teď čas řídí explicitně. Liveness heartbeat zachovaný pro disconnect detection. Nové env vars `SESSION_DURATION_SECONDS` a `EXTEND_SECONDS`; `ACTIVITY_TIMEOUT_SECONDS` zrušen.
 - **2026-04-18** — Activity-based idle timeout. Heartbeat se rozpadl na liveness (auto, každých 10 s, timeout 30 s) a activity (debounced user interakce, timeout 180 s = 3 min). Reaper kontroluje obě osy + hard cap MAX_SESSION_SECONDS. Nový env var `ACTIVITY_TIMEOUT_SECONDS`.
 - **2026-04-18** — Presence tracking a auto-off. JS na home page pingá `/session/heartbeat` každých 10 s, `pagehide` spouští `sendBeacon` na `/session/end`. Server reaper (každých 5 s) pročistí sessions nad `HEARTBEAT_TIMEOUT_SECONDS` nebo `MAX_SESSION_SECONDS`. Relé se vypne až když žádná session nezůstane aktivní (multi-tab / multi-user safe).

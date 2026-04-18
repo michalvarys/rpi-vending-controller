@@ -30,9 +30,9 @@ PORT = int(os.environ.get("PORT", "8081"))
 HEARTBEAT_TIMEOUT_SECONDS = int(os.environ.get("HEARTBEAT_TIMEOUT_SECONDS", "30"))
 # Initial countdown timer length granted on login. After this expires the relay
 # turns off unless the user has explicitly clicked "extend".
-SESSION_DURATION_SECONDS = int(os.environ.get("SESSION_DURATION_SECONDS", "180"))
+SESSION_DURATION_SECONDS = int(os.environ.get("SESSION_DURATION_SECONDS", "60"))
 # How many seconds each "Prodloužit" click adds. Capped at MAX_SESSION_SECONDS total.
-EXTEND_SECONDS = int(os.environ.get("EXTEND_SECONDS", "180"))
+EXTEND_SECONDS = int(os.environ.get("EXTEND_SECONDS", "30"))
 # Hard cap on a single session — relay always goes off at this point even if the user keeps extending.
 MAX_SESSION_SECONDS = int(os.environ.get("MAX_SESSION_SECONDS", "900"))
 # JS liveness polling interval (sent to the template).
