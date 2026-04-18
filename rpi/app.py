@@ -489,6 +489,9 @@ QR_HTML = """<!doctype html>
   canvas { display: block; }
   .meta { color: var(--muted); font-size: .9rem; text-align: center; }
   .meta strong { color: var(--fg); font-variant-numeric: tabular-nums; }
+  .qr-link { color: var(--accent); font-family: ui-monospace, monospace; font-size: .82rem; word-break: break-all; max-width: 30rem; text-align: center; text-decoration: none; padding: .4rem .8rem; border: 1px solid rgba(96,165,250,.3); border-radius: .4rem; }
+  .qr-link:hover { background: rgba(96,165,250,.1); }
+  .qr-link:empty { display: none; }
   .warning { color: #fca5a5; font-size: .85rem; max-width: 30rem; text-align: center; }
 </style>
 <script src="/static/qrcode.min.js"></script>
@@ -498,11 +501,13 @@ QR_HTML = """<!doctype html>
 <div class="device">{{ device }}</div>
 <div class="qr-wrap"><canvas id="qr"></canvas></div>
 <div class="meta" id="meta">Načítám kód…</div>
+<a id="qr-link" class="qr-link" target="_blank" rel="noopener"></a>
 <div class="warning" id="warning"></div>
 
 <script>
 const canvas = document.getElementById('qr');
 const metaEl = document.getElementById('meta');
+const linkEl = document.getElementById('qr-link');
 const warnEl = document.getElementById('warning');
 let rotateAt = 0;
 let latestUrl = '';
@@ -513,9 +518,13 @@ async function refresh() {
     if (!data.url) {
       warnEl.textContent = 'QR_BASE_URL není nastavená v .env — QR zatím ukazuje jen token, bez cílové URL pro shop.';
       latestUrl = `token:${data.device}:${data.token}`;
+      linkEl.removeAttribute('href');
+      linkEl.textContent = '';
     } else {
       warnEl.textContent = '';
       latestUrl = data.url;
+      linkEl.href = data.url;
+      linkEl.textContent = data.url;
     }
     rotateAt = data.rotate_at;
     QRCode.toCanvas(canvas, latestUrl, { width: 320, margin: 2, errorCorrectionLevel: 'M' });
