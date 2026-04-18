@@ -68,10 +68,10 @@ Otevři `http://varyshop-trafika-vps:8081/` v prohlížeči. Login vidí tři te
 | Účet         | Přihlášení bez QR              | Po přihlášení s QR                                              |
 |--------------|--------------------------------|------------------------------------------------------------------|
 | `admin`      | Info page (link na hub)        | Dashboard daného RPi + ruční Zapnout / Vypnout                  |
-| `verified`   | **Blokováno** — „Naskenuj QR" | Relé se okamžitě zapne, stránka ukáže „Automat BĚŽÍ"            |
-| `unverified` | **Blokováno** — „Naskenuj QR" | Ověřovací obrazovka → po „Ověřit" se chová jako verified        |
+| `verified`   | Login OK, ale „Naskenuj QR" page — **relé se nezapne** | Relé se okamžitě zapne, stránka ukáže „Automat BĚŽÍ"    |
+| `unverified` | Login OK, ale „Naskenuj QR" page — **relé se nezapne** | Ověřovací obrazovka → po „Ověřit" se chová jako verified |
 
-Zákazník **nemůže přihlásit bez QR** — shop bez tokenu nemůže vědět, který automat spustit. Admin může ale neuvidí žádný konkrétní automat (redirect na hub pro správu).
+Přihlášení je vždy vítáno, ale **aktivace automatu vyžaduje čerstvý QR token**. Díky tomu zákazník nemusí zadávat údaje pokaždé — přihlásí se jednou, pak už jen scanuje QR kódy různých automatů. Pinned_rpi má TTL `MAX_SESSION_SECONDS` (15 min); starý cookie z ranního nákupu automat nezapne večer.
 
 Odhlášení (`Odhlásit`) na všech kartách volá hub `/off` pro navázaný RPi, takže po skončení sezení automat zůstane vypnutý.
 
@@ -87,7 +87,8 @@ Odhlášení (`Odhlásit`) na všech kartách volá hub `/off` pro navázaný RP
 | POST   | `/login`      | ne            | Přihlášení (session cookie)                       |
 | POST   | `/logout`     | session       | Odhlášení + vypnutí relé                          |
 | GET    | `/`                  | session       | Role-based home + viditelný countdown timer      |
-| GET    | `/activate/<rpi>/<token>` | ne        | Vstup z QR kódu. Validuje přes hub, pinne RPi do session, redirect na /login. |
+| GET    | `/activate/<rpi>/<token>` | ne        | Vstup z QR kódu. Validuje přes hub, pinne RPi + pinned_at do session, redirect na /login. Ponechá user_id + verified_flag → přihlášený uživatel pokračuje plynule. |
+| GET    | `/expired`           | session       | Stránka „Naskenuj QR" pro přihlášené zákazníky bez (nebo s expirovaným) pinem. |
 | GET    | `/verify`            | session       | Ověřovací obrazovka (jen pro unverified)         |
 | POST   | `/verify`            | session       | Označí session jako ověřenou                     |
 | POST   | `/relay/on`          | session+verif | Admin nebo verified → hub `/on`                  |
@@ -161,7 +162,8 @@ Tento `/activate/<rpi>/<token>` routing musí v Odoo modulu přibýt jako vlastn
 
 ## Changelog
 
-- **2026-04-18** — **Bez QR se nepřihlásíš.** Customer login (verified/unverified) vyžaduje `session["pinned_rpi"]` — ten se nastaví jen přes `/activate/<rpi>/<token>`. Přímý /login bez QR teď vrací „Pro přihlášení naskenuj QR kód". Admin si může přihlásit bez QR, ale dostane info page s odkazem na hub (místo aby zapnul nějaký default RPi). `RPI_HOSTNAME` už není povinné; ze stejného důvodu je nový env var odznačený jako optional fallback pro admin.
+- **2026-04-19** — Login teď vždy projde, ale **aktivace automatu** vyžaduje čerstvý QR pin. Zákazník bez QR po přihlášení vidí /expired („Naskenuj QR") místo aktivace. `pinned_rpi` má TTL = MAX_SESSION_SECONDS, po expiraci se resetuje. Session (user_id + verified_flag) přežívá — uživatel se přihlásí jednou, pak už jen scanuje QR různých automatů.
+- **2026-04-18** — **Bez QR se nepřihlásíš.** Customer login (verified/unverified) vyžadoval `session["pinned_rpi"]`. Revertováno — přihlášení se nebránil, jen aktivace. (Blokovat login byl příliš přísný UX.)
 - **2026-04-18** — QR aktivační flow. `GET /activate/<rpi>/<token>` validuje přes hub, pinne RPi do session, provede uživatele loginem. Po loginu home volá hub `/on` pro pinned RPi místo hardcoded defaultu. Ze shop-mocku `RPI_HOSTNAME` se stal `DEFAULT_RPI_HOSTNAME` — používá se jen pro login bez QR (testovací nebo admin).
 - **2026-04-18** — Admin session je bez odpočtu. Admin karta v UI neobsahuje countdown ani Extend tlačítko; `expires_at = ∞`, reaper nikdy neexpiruje admina podle timeru. Liveness timeout (30 s bez heartbeatu) pořád platí.
 - **2026-04-18** — Defaulty timeru zkráceny: `SESSION_DURATION_SECONDS=60` (z 180), `EXTEND_SECONDS=30` (z 180). Hard cap zachován (900 s). Vending UX: kratší kus „kreditu" + drobnější extends je realističtější pro krátký nákup.

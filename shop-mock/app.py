@@ -294,10 +294,17 @@ def activate_qr(rpi, token):
         return render_template_string(QR_ERROR_HTML,
                                       reason=result.get("reason", "unknown"),
                                       rpi=rpi), 400
-    # Pin this RPi for the rest of the browser session; surviving login/logout cycles
-    # isn't important, just the immediate login flow.
+    # Preserve login + verified_flag so a returning customer doesn't have to re-authenticate
+    # when they scan a fresh QR. The pin + pin timestamp are overwritten fresh.
+    keep_user = session.get("user_id")
+    keep_verified = session.get("verified_flag")
     session.clear()
+    if keep_user:
+        session["user_id"] = keep_user
+    if keep_verified:
+        session["verified_flag"] = keep_verified
     session["pinned_rpi"] = rpi
+    session["pinned_at"] = int(time.time())
     return redirect(url_for("login"))
 
 
@@ -316,14 +323,20 @@ def do_login():
     user = USERS.get(username)
     if not user or user["password"] != password:
         return redirect(url_for("login", error="bad_credentials"))
+    # Login always succeeds — activation gate is separate. Without a QR-sourced pin
+    # the customer just lands on the "awaiting QR" page; credentials don't grant
+    # power on their own.
     pinned = session.get("pinned_rpi")
-    # Customers must arrive via QR. Only admin may log in without a pinned RPi.
-    if not pinned and user["role"] != "admin":
-        return redirect(url_for("login", error="qr_required"))
+    pinned_at = session.get("pinned_at")
+    verified_flag = session.get("verified_flag")
     session.clear()
     session["user_id"] = username
     if pinned:
         session["pinned_rpi"] = pinned
+        if pinned_at:
+            session["pinned_at"] = pinned_at
+    if verified_flag:
+        session["verified_flag"] = verified_flag
     return redirect(url_for("home"))
 
 
@@ -375,6 +388,16 @@ def home():
     if user["role"] == "admin" and not session_rpi():
         return render_template_string(ADMIN_NO_RPI_HTML, user=user, hub_url=HUB_URL)
 
+    # Customers must have a *fresh* QR-sourced pin. A cookie lingering from hours ago
+    # isn't good enough — force a re-scan.
+    if user["role"] != "admin":
+        pinned_rpi = session.get("pinned_rpi")
+        pinned_at = session.get("pinned_at", 0)
+        if not pinned_rpi or (time.time() - pinned_at) > MAX_SESSION_SECONDS:
+            session.pop("pinned_rpi", None)
+            session.pop("pinned_at", None)
+            return redirect(url_for("expired"))
+
     _register_presence(user["id"], user["role"])
     view = _current_session_view() or {"timer_disabled": False, "expires_in": 0, "max_remaining": 0, "at_max": False}
 
@@ -408,6 +431,12 @@ def verify():
     if user["role"] != "unverified" or session.get("verified_flag"):
         return redirect(url_for("home"))
     return render_template_string(VERIFY_HTML, user=user)
+
+
+@app.get("/expired")
+@login_required
+def expired():
+    return render_template_string(EXPIRED_HTML, user=current_user())
 
 
 @app.post("/verify")
@@ -509,7 +538,6 @@ LOGIN_HTML = """<!doctype html>
       Aktivace přes QR pro <strong>{{ pinned_rpi }}</strong>. Po přihlášení se automat zapne.
     </div>{% endif %}
     {% if error == 'bad_credentials' %}<div class="error">Špatné uživatelské jméno nebo heslo.</div>
-    {% elif error == 'qr_required' %}<div class="error">Pro přihlášení naskenuj QR kód u automatu.<br><span class="muted" style="font-size:.8rem">Bez QR neví server, který automat zapnout.</span></div>
     {% elif error %}<div class="error">Nepovedlo se přihlásit.</div>{% endif %}
     <form method="post" action="/login">
       <label for="u">Uživatel</label>
@@ -620,7 +648,7 @@ HOME_HTML = """<!doctype html>
   // Liveness ping — always runs, catches tab close / disconnect even for admin.
   function liveness() {
     fetch('/session/heartbeat', { method: 'POST', credentials: 'same-origin' })
-      .then(r => { if (r.status === 410) window.location.href = '/login'; })
+      .then(r => { if (r.status === 410) window.location.href = '/expired'; })
       .catch(() => {});
   }
   liveness();
@@ -660,7 +688,7 @@ HOME_HTML = """<!doctype html>
     render();
     if (expiresIn <= 0) {
       fetch('/session/heartbeat', { method: 'POST', credentials: 'same-origin' })
-        .then(r => { if (r.status === 410) window.location.href = '/login'; });
+        .then(r => { if (r.status === 410) window.location.href = '/expired'; });
     }
   }
 
@@ -668,7 +696,7 @@ HOME_HTML = """<!doctype html>
     extendBtn.disabled = true;
     try {
       const r = await fetch('/session/extend', { method: 'POST', credentials: 'same-origin' });
-      if (r.status === 410) { window.location.href = '/login'; return; }
+      if (r.status === 410) { window.location.href = '/expired'; return; }
       const data = await r.json();
       expiresIn = data.expires_in;
       maxRemaining = data.max_remaining;
@@ -687,6 +715,35 @@ HOME_HTML = """<!doctype html>
 </body>
 </html>
 """
+
+EXPIRED_HTML = """<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<title>Naskenuj QR — Trafika</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>""" + BASE_CSS + """</style>
+</head>
+<body>
+<main>
+  <h1>Přihlášen jako {{ user.display }}</h1>
+  <div class="tag">žádný automat aktuálně napárovaný</div>
+
+  <div class="card">
+    <p><strong>Naskenuj QR kód přímo u automatu</strong>, který chceš použít.</p>
+    <p class="muted" style="margin-top:1rem">Přihlášení je platné — po naskenování QR se automat aktivuje rovnou, bez dalšího přihlašování.</p>
+  </div>
+
+  <div class="card">
+    <form method="post" action="/logout" style="margin:0">
+      <button class="secondary" type="submit">Odhlásit</button>
+    </form>
+  </div>
+</main>
+</body>
+</html>
+"""
+
 
 ADMIN_NO_RPI_HTML = """<!doctype html>
 <html lang="cs">
