@@ -24,7 +24,11 @@ QR_ROTATE_SECONDS = int(os.environ.get("QR_ROTATE_SECONDS", "60"))
 # wide open (only acceptable on a tailnet-only deployment).
 HUB_ADMIN_USER = os.environ.get("HUB_ADMIN_USER", "admin").strip()
 HUB_ADMIN_PASSWORD = os.environ.get("HUB_ADMIN_PASSWORD", "").strip()
-# Paths that bypass auth: server-to-server endpoints + healthcheck.
+# Service-to-service token (Authorization: Bearer ...) — used by shop-mock / Odoo
+# to call control endpoints without sharing the admin password. If empty, only
+# Basic Auth is accepted on protected routes.
+HUB_API_TOKEN = os.environ.get("HUB_API_TOKEN", "").strip()
+# Paths that bypass auth entirely: server-to-server validate + healthcheck.
 _PUBLIC_PATHS = {"/api/qr/validate", "/api/health"}
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
@@ -126,13 +130,19 @@ app = Flask(__name__)
 
 @app.before_request
 def _basic_auth():
-    if not HUB_ADMIN_PASSWORD:
+    if not HUB_ADMIN_PASSWORD and not HUB_API_TOKEN:
         return None
     if request.path in _PUBLIC_PATHS:
         return None
-    auth = request.authorization
-    if auth and auth.username == HUB_ADMIN_USER and auth.password == HUB_ADMIN_PASSWORD:
-        return None
+    # Bearer token first (services), then Basic Auth (humans in browser).
+    if HUB_API_TOKEN:
+        bearer = request.headers.get("Authorization", "")
+        if bearer.startswith("Bearer ") and hmac.compare_digest(bearer[7:].strip(), HUB_API_TOKEN):
+            return None
+    if HUB_ADMIN_PASSWORD:
+        auth = request.authorization
+        if auth and auth.username == HUB_ADMIN_USER and auth.password == HUB_ADMIN_PASSWORD:
+            return None
     return Response(
         "Auth required",
         status=401,
@@ -560,9 +570,10 @@ setInterval(refresh, 3000);
 
 if __name__ == "__main__":
     log.info("Loaded %d RPi(s) from %s", len(RPIS), RPIS_FILE)
-    if HUB_ADMIN_PASSWORD:
-        log.info("Basic auth enabled (user=%s, public bypass: %s)", HUB_ADMIN_USER, sorted(_PUBLIC_PATHS))
+    if HUB_ADMIN_PASSWORD or HUB_API_TOKEN:
+        log.info("Auth enabled (basic=%s, bearer=%s, public bypass: %s)",
+                 bool(HUB_ADMIN_PASSWORD), bool(HUB_API_TOKEN), sorted(_PUBLIC_PATHS))
     else:
-        log.warning("HUB_ADMIN_PASSWORD not set — hub UI is OPEN. Set it before exposing this hub publicly.")
+        log.warning("Neither HUB_ADMIN_PASSWORD nor HUB_API_TOKEN set — hub is OPEN.")
     Thread(target=poller_loop, daemon=True).start()
     app.run(host=HOST, port=PORT)

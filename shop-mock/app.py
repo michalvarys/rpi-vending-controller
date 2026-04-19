@@ -16,6 +16,11 @@ HUB_URL = os.environ.get("HUB_URL", "http://127.0.0.1:8080").rstrip("/")
 # Internal HUB_URL is for server-side API calls (hub_post, hub_validate_qr) and stays
 # on the tailnet; HUB_PUBLIC_URL is what the customer's / admin's browser must reach.
 HUB_PUBLIC_URL = os.environ.get("HUB_PUBLIC_URL", HUB_URL).rstrip("/")
+# Bearer token for authenticating against the hub's protected control endpoints.
+# Must match HUB_API_TOKEN on the hub. Empty = no auth header sent (only works
+# when the hub is also unauthenticated).
+HUB_API_TOKEN = os.environ.get("HUB_API_TOKEN", "").strip()
+_HUB_HEADERS = {"Authorization": f"Bearer {HUB_API_TOKEN}"} if HUB_API_TOKEN else {}
 # Optional fallback for admin logins without a QR. Customers (verified/unverified)
 # always need a QR-sourced pinned_rpi — knowing which machine to power on must come
 # from the physical QR scan, not from shop config.
@@ -260,7 +265,7 @@ def session_rpi():
 def hub_post(path, rpi_hostname=None):
     host = rpi_hostname or session_rpi()
     try:
-        r = requests.post(f"{HUB_URL}/api/rpi/{host}{path}", timeout=5)
+        r = requests.post(f"{HUB_URL}/api/rpi/{host}{path}", headers=_HUB_HEADERS, timeout=5)
         r.raise_for_status()
         return True, None
     except requests.RequestException as e:
@@ -271,7 +276,8 @@ def hub_post(path, rpi_hostname=None):
 def hub_state(rpi_hostname=None):
     host = rpi_hostname or session_rpi()
     try:
-        for rpi in requests.get(f"{HUB_URL}/api/dashboard", timeout=3).json():
+        r = requests.get(f"{HUB_URL}/api/dashboard", headers=_HUB_HEADERS, timeout=3)
+        for rpi in r.json():
             if rpi["hostname"] == host:
                 return rpi
     except (requests.RequestException, ValueError):
@@ -281,6 +287,7 @@ def hub_state(rpi_hostname=None):
 
 def hub_validate_qr(hostname, token):
     try:
+        # /api/qr/validate is on the hub's public bypass list, no auth header needed.
         r = requests.post(f"{HUB_URL}/api/qr/validate",
                           json={"rpi_hostname": hostname, "token": token},
                           timeout=5)
