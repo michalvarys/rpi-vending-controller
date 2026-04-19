@@ -224,6 +224,26 @@ def _qr_token(hostname, secret, rotate_seconds, window_offset=0, now=None):
     return base64.urlsafe_b64encode(mac[:9]).decode().rstrip("=")
 
 
+# Single-use bookkeeping: each (rpi, token) pair can be consumed at most once.
+# Entries age out after a few rotation windows.
+_consumed_tokens = {}
+_consumed_lock = Lock()
+
+
+def _consume_token(hostname, token, now):
+    key = (hostname, token)
+    cutoff = now - QR_ROTATE_SECONDS * 4
+    with _consumed_lock:
+        # Housekeeping: forget entries older than the rotation horizon.
+        stale = [k for k, ts in _consumed_tokens.items() if ts < cutoff]
+        for k in stale:
+            _consumed_tokens.pop(k, None)
+        if key in _consumed_tokens:
+            return False
+        _consumed_tokens[key] = now
+        return True
+
+
 @app.post("/api/qr/validate")
 def api_qr_validate():
     payload = request.get_json(silent=True) or {}
@@ -235,10 +255,12 @@ def api_qr_validate():
     if rpi is None:
         return jsonify(valid=False, reason="unknown rpi"), 404
     now = time.time()
-    # Accept current window + previous one so drift between QR display and login flow doesn't reject.
+    # HMAC check first — accept current and previous window for clock / scan-to-login drift.
     for offset in (0, -1):
         expected = _qr_token(hostname, rpi["token"], QR_ROTATE_SECONDS, offset, now)
         if hmac.compare_digest(expected, token):
+            if not _consume_token(hostname, token, now):
+                return jsonify(valid=False, reason="token already used"), 200
             return jsonify(valid=True, rpi_hostname=hostname, window_offset=offset), 200
     return jsonify(valid=False, reason="token mismatch"), 200
 

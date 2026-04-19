@@ -194,6 +194,7 @@ Docker kontejner neběží nebo spadl do restart loopu. `docker compose logs` uk
 
 ## Changelog
 
+- **2026-04-19** — Single-use QR tokeny. Úspěšná validace si poznamená `(rpi, token)` v in-memory mapě a příští validace téhož páru vrátí `valid=false, reason="token already used"`. Kombinace s 60s rotací znamená: každý QR lze spotřebovat **jen jednou v rámci své 60-s okna** — žádný replay během platnosti, žádné „opakovaně naskenuj ten samý QR a znovu aktivuj". Housekeeping maže záznamy starší než 4 rotation windows.
 - **2026-04-19** — HTTP Basic Auth pro dashboard a control endpointy. Nové env vars `HUB_ADMIN_USER` (default `admin`) a `HUB_ADMIN_PASSWORD` (musíš nastavit pro public deploy). Bez hesla hub jede otevřený, na startup se vypíše WARNING. Bypassed paths: `POST /api/qr/validate` (server-to-server) a `GET /api/health` (Docker healthcheck).
 - **2026-04-19** — Production hub container nově mapuje **i port 8090:8080** (kromě defaultního 8080) — Hetzner reverse proxy blokuje 8080. Public access na `hub.elite-trafika.cz` jde přes 8090, tailnet/interní přes 8080. Doplněna sekce „Pozn. produkční deploy".
 - **2026-04-18** — `POST /api/qr/validate` endpoint — sdílí stejný HMAC výpočet jako RPi `/api/qr`. Shop (shop-mock, později Odoo) posílá `{rpi_hostname, token}`; hub najde RPi v `rpis.yml`, zrekonstruuje token pro aktuální a předchozí window, vrátí `valid: bool` + offset. Nový env var `QR_ROTATE_SECONDS` (default 60, musí match RPi).
