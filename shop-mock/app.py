@@ -206,12 +206,22 @@ def _entry_view(entry, now=None):
     if now is None:
         now = time.time()
     if entry.get("role") == "admin":
-        return {"timer_disabled": True, "expires_in": None, "max_remaining": None, "at_max": False}
+        return {
+            "timer_disabled": True,
+            "expires_in": None, "expires_at": None,
+            "max_remaining": None, "max_expires_at": None,
+            "at_max": False,
+        }
     max_expires = entry["started_at"] + MAX_SESSION_SECONDS
     return {
         "timer_disabled": False,
+        # Relative (seconds until expiry) — convenient for CLI / debugging.
         "expires_in": max(0, int(round(entry["expires_at"] - now))),
         "max_remaining": max(0, int(round(max_expires - now))),
+        # Absolute (epoch seconds) — client renders countdown from these against its own
+        # wall clock, so device sleep/wake doesn't leave the timer stuck.
+        "expires_at": int(entry["expires_at"]),
+        "max_expires_at": int(max_expires),
         "at_max": entry["expires_at"] >= max_expires - 0.5,
     }
 
@@ -466,8 +476,8 @@ def home():
                                   session_duration=SESSION_DURATION_SECONDS,
                                   extend_seconds=EXTEND_SECONDS,
                                   max_session_seconds=MAX_SESSION_SECONDS,
-                                  expires_in=view.get("expires_in") or 0,
-                                  max_remaining=view.get("max_remaining") or 0,
+                                  expires_at=view.get("expires_at") or 0,
+                                  max_expires_at=view.get("max_expires_at") or 0,
                                   at_max=view.get("at_max", False),
                                   timer_disabled=view.get("timer_disabled", False))
 
@@ -664,7 +674,7 @@ HOME_HTML = """<!doctype html>
 
   {% if not timer_disabled %}
   <div class="card">
-    <div class="timer" id="timer" data-expires-in="{{ expires_in }}" data-max-remaining="{{ max_remaining }}" data-at-max="{{ 'true' if at_max else 'false' }}">
+    <div class="timer" id="timer" data-expires-at="{{ expires_at }}" data-max-expires-at="{{ max_expires_at }}" data-at-max="{{ 'true' if at_max else 'false' }}">
       <div class="label">Čas do vypnutí</div>
       <div class="value" id="timer-value">—</div>
       <div class="max" id="timer-max"></div>
@@ -710,8 +720,10 @@ HOME_HTML = """<!doctype html>
   const maxEl = document.getElementById('timer-max');
   const extendBtn = document.getElementById('extend-btn');
 
-  let expiresIn = parseInt(timerEl.dataset.expiresIn || '0', 10);
-  let maxRemaining = parseInt(timerEl.dataset.maxRemaining || '0', 10);
+  // Absolute epoch seconds — rendered from the wall clock each tick so sleep/wake can't
+  // freeze the countdown in place.
+  let expiresAt = parseFloat(timerEl.dataset.expiresAt || '0');
+  let maxExpiresAt = parseFloat(timerEl.dataset.maxExpiresAt || '0');
   let atMax = timerEl.dataset.atMax === 'true';
 
   function fmt(s) {
@@ -721,20 +733,24 @@ HOME_HTML = """<!doctype html>
     return m + ':' + (sec < 10 ? '0' : '') + sec;
   }
 
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  const remaining = () => Math.max(0, expiresAt - nowSec());
+  const maxRemaining = () => Math.max(0, maxExpiresAt - nowSec());
+
   function render() {
-    valueEl.textContent = fmt(expiresIn);
-    timerEl.classList.toggle('urgent', expiresIn <= 30);
+    const r = remaining();
+    const mr = maxRemaining();
+    valueEl.textContent = fmt(r);
+    timerEl.classList.toggle('urgent', r <= 30);
     maxEl.textContent = atMax
-      ? 'Dosažen maximální čas — nelze prodloužit, zbývá ' + fmt(maxRemaining)
-      : 'Max v této session: ' + fmt(maxRemaining);
-    extendBtn.disabled = atMax || maxRemaining <= 0;
+      ? 'Dosažen maximální čas — nelze prodloužit, zbývá ' + fmt(mr)
+      : 'Max v této session: ' + fmt(mr);
+    extendBtn.disabled = atMax || mr <= 0;
   }
 
   function tick() {
-    if (expiresIn > 0) expiresIn -= 1;
-    if (maxRemaining > 0) maxRemaining -= 1;
     render();
-    if (expiresIn <= 0) {
+    if (remaining() <= 0) {
       fetch('/session/heartbeat', { method: 'POST', credentials: 'same-origin' })
         .then(r => { if (r.status === 410) window.location.href = '/expired'; });
     }
@@ -746,8 +762,8 @@ HOME_HTML = """<!doctype html>
       const r = await fetch('/session/extend', { method: 'POST', credentials: 'same-origin' });
       if (r.status === 410) { window.location.href = '/expired'; return; }
       const data = await r.json();
-      expiresIn = data.expires_in;
-      maxRemaining = data.max_remaining;
+      if (data.expires_at) expiresAt = data.expires_at;
+      if (data.max_expires_at) maxExpiresAt = data.max_expires_at;
       atMax = !!data.at_max;
       render();
     } catch (e) {
