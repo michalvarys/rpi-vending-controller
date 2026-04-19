@@ -13,6 +13,22 @@ Central hub agreguje stav všech Raspberry Pi controllerů, ukazuje je v gridu a
 
 ---
 
+## ⚠️ Pozn. produkční deploy: port 8090 navíc
+
+Production hosting (Hetzner) blokuje **port 8080** mezi proxy serverem a VPS (anti-abuse default block-list pro běžné porty). Reverse proxy proto nemůže dosáhnout na hub přes 8080. Workaround: hub kontejner mapovat **na host port 8090** navíc:
+
+```yaml
+ports:
+  - ${PORT:-8080}:8080   # interní / tailnet přístup
+  - 8090:8080            # public proxy upstream
+```
+
+V proxy admin UI nastav upstream pro `hub.elite-trafika.cz` na `http://<vps-ip>:8090`. Tailnet komunikace (`varyshop-trafika-vps:8080`) zůstává funkční přes 8080.
+
+Pokud nasazuješ hub jinam, kde 8080 není blokovaný, řádek `- 8090:8080` můžeš vynechat.
+
+---
+
 ## 1. Příprava adresáře
 
 ```bash
@@ -176,6 +192,7 @@ Docker kontejner neběží nebo spadl do restart loopu. `docker compose logs` uk
 
 ## Changelog
 
+- **2026-04-19** — Production hub container nově mapuje **i port 8090:8080** (kromě defaultního 8080) — Hetzner reverse proxy blokuje 8080. Public access na `hub.elite-trafika.cz` jde přes 8090, tailnet/interní přes 8080. Doplněna sekce „Pozn. produkční deploy".
 - **2026-04-18** — `POST /api/qr/validate` endpoint — sdílí stejný HMAC výpočet jako RPi `/api/qr`. Shop (shop-mock, později Odoo) posílá `{rpi_hostname, token}`; hub najde RPi v `rpis.yml`, zrekonstruuje token pro aktuální a předchozí window, vrátí `valid: bool` + offset. Nový env var `QR_ROTATE_SECONDS` (default 60, musí match RPi).
 - **2026-04-18** — Nové tlačítko restart (`↻`) s confirm dialogem. Proxy endpoint `POST /api/rpi/<hostname>/restart` volá RPi `/api/restart` s tokenem. Po kliku se tlačítka na chvíli zablokují, UI se refreshne za 6 s (doba znovunaběhnutí kontejneru).
 - **2026-04-18** — Karty ukazují health status (healthy / N issues / offline), polohu zařízení, metriky (internet, uptime, disk, CPU teplota, RAM, load) a rozbalitelné „Info o zařízení" (model, sériové č., host OS, kernel, public IP). Hub nově polluje `/api/status` a `/api/device` kromě `/api/state` a `/api/logs`. Při krátkém výpadku RPi se uchovává poslední známý stav device info, aby karta nezmizela.
