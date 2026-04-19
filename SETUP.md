@@ -364,6 +364,7 @@ Udržuj tento seznam — když se něco dotáhne, přesuň do Changelogu níž a
 
 ## Changelog
 
+- **2026-04-19** — Volitelný kiosk mód. Nový `scripts/install-kiosk.sh` — na Pi OS Desktop (Bookworm labwc/LXDE) zajistí, že po bootu se automaticky otevře `http://localhost:8080/qr` ve fullscreen Chromium. Doinstaluje chromium + unclutter, vytvoří wrapper skript, XDG autostart entry, zapne desktop autologin přes raspi-config. Headless instalace bez displeje script nepotřebuje.
 - **2026-04-18** — QR aktivační flow. Nové endpointy `/qr` (stránka s live QR) a `/api/qr` (aktuální token). Token = HMAC-SHA256(`WEBHOOK_TOKEN`, `hostname:floor(now/60)`), rotuje každých `QR_ROTATE_SECONDS` (default 60 s). Dvě nové env proměnné: `QR_BASE_URL` (veřejná URL shopu) a `QR_ROTATE_SECONDS`. QR vede na `<QR_BASE_URL>/activate/<hostname>/<token>` — ta trasa patří do reálného Odoo modulu (mock implementace v `shop-mock/`). Hub má `POST /api/qr/validate` s identickým HMAC výpočtem.
 - **2026-04-18** — `/api/restart` nyní **rebootuje celé RPi** (ne jen kontejner). Používá `reboot(2)` syscall přes ctypes; compose nově přidává `cap_add: [SYS_BOOT]`. Při chybějící capability se degraduje na restart kontejneru. UI tooltip a confirm dialog v hubu aktualizované.
 - **2026-04-18** — Remote restart. Nový endpoint `POST /api/restart` (token-protected) — zaloguje událost, odpoví 200, po 1 s zavolá `os._exit(0)`. Docker `restart: unless-stopped` kontejner pustí znovu; relé přejde do defaultního OFF. V hub UI nové tlačítko `↻` s confirm dialogem.
