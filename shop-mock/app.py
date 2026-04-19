@@ -91,43 +91,49 @@ def is_verified(user):
 # (tab closed, device sleep, network drop, idle user). Heartbeat extends the lifetime;
 # reaper thread prunes stale entries every few seconds.
 
-_active = {}  # sid -> {"user_id": str, "last_ping": float, "started_at": float}
+_active = {}  # sid -> {"user_id", "role", "rpi_hostname", "last_alive", "expires_at", "started_at"}
 _active_lock = Lock()
 
-# When the last session disappears we wait GRACE_SECONDS before turning the relay off.
-# Purpose: a same-origin form submit fires `pagehide` on the outgoing page (which beacons
-# /session/end), and only afterwards does the target page load and re-register presence.
-# Without the grace window we would off+on in rapid succession, occasionally ending with
-# the off winning the race.
+# When the last session for a given RPi disappears we wait GRACE_SECONDS before turning
+# its relay off. Per-RPi tracking matters because multiple sessions on different RPis
+# don't interact: dropping rpi-A shouldn't power down rpi-B.
 GRACE_SECONDS = 3
-_pending_off_timer = None
+_pending_off_timers = {}  # rpi_hostname -> Timer
 _pending_off_lock = Lock()
 
 
-def _schedule_relay_off():
-    global _pending_off_timer
+def _has_active_session_for(rpi_hostname):
+    with _active_lock:
+        return any(e.get("rpi_hostname") == rpi_hostname for e in _active.values())
+
+
+def _schedule_relay_off(rpi_hostname):
+    if not rpi_hostname:
+        return
 
     def fire():
-        with _active_lock:
-            still_empty = not _active
-        if still_empty:
-            log.info("Grace elapsed with no sessions — turning relay off")
-            hub_post("/off")
+        if _has_active_session_for(rpi_hostname):
+            return  # someone reactivated within the grace window
+        log.info("Grace elapsed for %s — turning relay off", rpi_hostname)
+        hub_post("/off", rpi_hostname=rpi_hostname)
 
     with _pending_off_lock:
-        if _pending_off_timer is not None:
-            _pending_off_timer.cancel()
-        _pending_off_timer = Timer(GRACE_SECONDS, fire)
-        _pending_off_timer.daemon = True
-        _pending_off_timer.start()
+        existing = _pending_off_timers.pop(rpi_hostname, None)
+        if existing is not None:
+            existing.cancel()
+        t = Timer(GRACE_SECONDS, fire)
+        t.daemon = True
+        _pending_off_timers[rpi_hostname] = t
+        t.start()
 
 
-def _cancel_pending_off():
-    global _pending_off_timer
+def _cancel_pending_off(rpi_hostname):
+    if not rpi_hostname:
+        return
     with _pending_off_lock:
-        if _pending_off_timer is not None:
-            _pending_off_timer.cancel()
-            _pending_off_timer = None
+        t = _pending_off_timers.pop(rpi_hostname, None)
+        if t is not None:
+            t.cancel()
 
 
 def _ensure_sid():
@@ -138,18 +144,16 @@ def _ensure_sid():
     return sid
 
 
-def _register_presence(user_id, role=""):
+def _register_presence(user_id, role="", rpi_hostname=""):
     sid = _ensure_sid()
     now = time.time()
     with _active_lock:
         existing = _active.get(sid)
         started = existing["started_at"] if existing else now
         if role == "admin":
-            # Admin has no countdown timer — only liveness (tab close) still applies.
             expires_at = float("inf")
         else:
             max_expires = started + MAX_SESSION_SECONDS
-            # On re-register (page reload mid-session) keep whatever expires_at we already have.
             if existing and existing.get("expires_at") not in (None, float("inf")):
                 expires_at = existing["expires_at"]
             else:
@@ -157,11 +161,12 @@ def _register_presence(user_id, role=""):
         _active[sid] = {
             "user_id": user_id,
             "role": role,
+            "rpi_hostname": rpi_hostname,
             "last_alive": now,
             "expires_at": expires_at,
             "started_at": started,
         }
-    _cancel_pending_off()
+    _cancel_pending_off(rpi_hostname)
 
 
 def _refresh_alive():
@@ -221,16 +226,16 @@ def _current_session_view():
 
 
 def _drop_presence():
-    """Remove current session. If nobody else is present, schedule a deferred relay off."""
+    """Remove current session. If its RPi has no other sessions, schedule a deferred off."""
     sid = session.get("sid")
     if not sid:
         return
     with _active_lock:
-        _active.pop(sid, None)
-        remaining = len(_active)
-    if remaining == 0:
-        log.info("Session %s ended — scheduling relay off in %ds", sid, GRACE_SECONDS)
-        _schedule_relay_off()
+        entry = _active.pop(sid, None)
+    rpi = entry.get("rpi_hostname") if entry else None
+    if rpi and not _has_active_session_for(rpi):
+        log.info("Session %s ended for %s — scheduling relay off in %ds", sid, rpi, GRACE_SECONDS)
+        _schedule_relay_off(rpi)
 
 
 def _reaper_loop():
@@ -238,21 +243,25 @@ def _reaper_loop():
         time.sleep(2)
         now = time.time()
         expired = []
+        affected_rpis = set()
         with _active_lock:
             for sid, entry in list(_active.items()):
+                reason = None
                 if now - entry["last_alive"] > HEARTBEAT_TIMEOUT_SECONDS:
-                    expired.append((sid, "disconnected", entry["user_id"]))
-                    _active.pop(sid, None)
+                    reason = "disconnected"
                 elif now > entry["expires_at"]:
-                    expired.append((sid, "timer_expired", entry["user_id"]))
+                    reason = "timer_expired"
+                if reason:
+                    expired.append((sid, reason, entry["user_id"], entry.get("rpi_hostname", "")))
+                    affected_rpis.add(entry.get("rpi_hostname", ""))
                     _active.pop(sid, None)
-            remaining = len(_active)
-        for sid, reason, user_id in expired:
-            log.info("Reaper dropped session %s (user=%s, reason=%s); remaining=%d",
-                     sid, user_id, reason, remaining)
-        if expired and remaining == 0:
-            log.info("All sessions gone — scheduling relay off in %ds", GRACE_SECONDS)
-            _schedule_relay_off()
+        for sid, reason, user_id, rpi in expired:
+            log.info("Reaper dropped session %s (user=%s, rpi=%s, reason=%s)",
+                     sid, user_id, rpi, reason)
+        for rpi in affected_rpis:
+            if rpi and not _has_active_session_for(rpi):
+                log.info("All sessions for %s gone — scheduling off in %ds", rpi, GRACE_SECONDS)
+                _schedule_relay_off(rpi)
 
 
 def session_rpi():
@@ -409,7 +418,7 @@ def home():
             session.pop("pinned_at", None)
             return redirect(url_for("expired"))
 
-    _register_presence(user["id"], user["role"])
+    _register_presence(user["id"], user["role"], rpi_hostname=session_rpi() or "")
     view = _current_session_view() or {"timer_disabled": False, "expires_in": 0, "max_remaining": 0, "at_max": False}
 
     relay_error = None
