@@ -120,7 +120,7 @@ fi
 DEVICE_NAME="${DEVICE_NAME:-$TS_HOSTNAME}"
 DISPLAY_NAME="${DISPLAY_NAME:-$DEVICE_NAME}"
 prompt LOCATION "" "Poloha (např. 'Praha, Vinohrady' — lze nechat prázdné)"
-prompt QR_BASE_URL "" "URL shopu pro QR aktivaci (např. http://varyshop-trafika-vps:8081, lze prázdné)"
+prompt QR_BASE_URL "https://automaty.elite-trafika.cz" "URL shopu pro QR aktivaci"
 
 if [[ -z "$WEBHOOK_TOKEN" ]]; then
   WEBHOOK_TOKEN=$(openssl rand -base64 32 | tr -d '=+/' | cut -c1-43)
