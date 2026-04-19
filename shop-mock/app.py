@@ -12,6 +12,10 @@ from flask import Flask, jsonify, redirect, render_template_string, request, ses
 from threading import Timer
 
 HUB_URL = os.environ.get("HUB_URL", "http://127.0.0.1:8080").rstrip("/")
+# Public-facing hub URL shown in browser links (admin "open hub" button etc.).
+# Internal HUB_URL is for server-side API calls (hub_post, hub_validate_qr) and stays
+# on the tailnet; HUB_PUBLIC_URL is what the customer's / admin's browser must reach.
+HUB_PUBLIC_URL = os.environ.get("HUB_PUBLIC_URL", HUB_URL).rstrip("/")
 # Optional fallback for admin logins without a QR. Customers (verified/unverified)
 # always need a QR-sourced pinned_rpi — knowing which machine to power on must come
 # from the physical QR scan, not from shop config.
@@ -386,7 +390,7 @@ def home():
     # Admin may have logged in without pinning a specific RPi — show an info page
     # instead of blindly targeting a machine.
     if user["role"] == "admin" and not session_rpi():
-        return render_template_string(ADMIN_NO_RPI_HTML, user=user, hub_url=HUB_URL)
+        return render_template_string(ADMIN_NO_RPI_HTML, user=user, hub_url=HUB_PUBLIC_URL)
 
     # Customers must have a *fresh* QR-sourced pin. A cookie lingering from hours ago
     # isn't good enough — force a re-scan.
