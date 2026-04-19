@@ -61,8 +61,13 @@ exec "$CHROMIUM_BIN" \\
   --noerrdialogs \\
   --disable-infobars \\
   --disable-session-crashed-bubble \\
-  --disable-features=Translate \\
+  --disable-features=Translate,PasswordManagerOnboarding,AutofillServerCommunication \\
+  --password-store=basic \\
+  --no-first-run \\
+  --no-default-browser-check \\
+  --disable-sync \\
   --check-for-update-interval=31536000 \\
+  --user-data-dir=/tmp/chromium-kiosk \\
   http://localhost:8080/qr
 EOF
 chmod +x "$WRAPPER"

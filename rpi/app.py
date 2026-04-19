@@ -476,91 +476,44 @@ QR_HTML = """<!doctype html>
 <html lang="cs">
 <head>
 <meta charset="utf-8">
-<title>{{ device }} — QR</title>
+<title>{{ device }}</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-  :root { --bg:#0f172a; --fg:#e2e8f0; --muted:#64748b; --card:#ffffff; --accent:#60a5fa; }
-  * { box-sizing: border-box; }
-  body { margin:0; font-family: ui-sans-serif, system-ui, sans-serif; background: var(--bg); color: var(--fg);
-         min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1.5rem; padding: 2rem; }
-  h1 { margin: 0; font-size: 1.25rem; color: var(--muted); font-weight: 500; letter-spacing: .1em; text-transform: uppercase; }
-  .device { font-size: 2rem; font-weight: 700; }
-  .qr-wrap { background: var(--card); padding: 1.5rem; border-radius: 1rem; }
-  .qr-wrap #qr { display: flex; align-items: center; justify-content: center; }
-  .qr-wrap img, .qr-wrap canvas { display: block; }
-  .meta { color: var(--muted); font-size: .9rem; text-align: center; }
-  .meta strong { color: var(--fg); font-variant-numeric: tabular-nums; }
-  .qr-link { color: var(--accent); font-family: ui-monospace, monospace; font-size: .82rem; word-break: break-all; max-width: 30rem; text-align: center; text-decoration: none; padding: .4rem .8rem; border: 1px solid rgba(96,165,250,.3); border-radius: .4rem; }
-  .qr-link:hover { background: rgba(96,165,250,.1); }
-  .qr-link:empty { display: none; }
-  .warning { color: #fca5a5; font-size: .85rem; max-width: 30rem; text-align: center; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: #ffffff; cursor: none; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  #qr { display: flex; align-items: center; justify-content: center; }
+  #qr canvas, #qr img { display: block; width: min(90vmin, 640px); height: auto; image-rendering: pixelated; }
 </style>
 <script src="/static/qrcode.min.js"></script>
 </head>
 <body>
-<h1>Naskenuj pro nákup</h1>
-<div class="device">{{ device }}</div>
-<div class="qr-wrap"><div id="qr"></div></div>
-<div class="meta" id="meta">Načítám kód…</div>
-<a id="qr-link" class="qr-link" target="_blank" rel="noopener"></a>
-<div class="warning" id="warning"></div>
-
+<div id="qr"></div>
 <script>
 const qrHolder = document.getElementById('qr');
-const metaEl = document.getElementById('meta');
-const linkEl = document.getElementById('qr-link');
-const warnEl = document.getElementById('warning');
 let rotateAt = 0;
 let qr = null;
 
 function ensureQr(text) {
-  if (qr) {
-    qr.clear();
-    qr.makeCode(text);
-    return;
-  }
-  qr = new QRCode(qrHolder, {
-    text: text,
-    width: 320,
-    height: 320,
-    correctLevel: QRCode.CorrectLevel.M,
-  });
+  if (qr) { qr.clear(); qr.makeCode(text); return; }
+  qr = new QRCode(qrHolder, { text: text, width: 640, height: 640, correctLevel: QRCode.CorrectLevel.M });
 }
 
 async function refresh() {
   try {
     const data = await fetch('/api/qr').then(r => r.json());
-    let payload;
-    if (!data.url) {
-      warnEl.textContent = 'QR_BASE_URL není nastavená v .env — QR zatím ukazuje jen token, bez cílové URL pro shop.';
-      payload = `token:${data.device}:${data.token}`;
-      linkEl.removeAttribute('href');
-      linkEl.textContent = '';
-    } else {
-      warnEl.textContent = '';
-      payload = data.url;
-      linkEl.href = data.url;
-      linkEl.textContent = data.url;
-    }
-    rotateAt = data.rotate_at;
-    ensureQr(payload);
-  } catch (e) {
-    warnEl.textContent = 'Chyba při načítání kódu: ' + e;
-  }
+    rotateAt = data.rotate_at || 0;
+    ensureQr(data.url || `token:${data.device}:${data.token}`);
+  } catch (e) { /* keep the stale code visible until we recover */ }
 }
 
-function tickMeta() {
-  const remaining = Math.max(0, rotateAt - Math.floor(Date.now() / 1000));
-  metaEl.innerHTML = remaining > 0
-    ? `Kód vyprší za <strong>${remaining}s</strong>`
-    : `Obnovuji…`;
-  if (remaining === 0) {
-    refresh();
-  }
+function tick() {
+  const now = Math.floor(Date.now() / 1000);
+  if (rotateAt && now >= rotateAt) refresh();
 }
 
 refresh();
-setInterval(tickMeta, 1000);
+setInterval(tick, 1000);
 </script>
 </body>
 </html>
