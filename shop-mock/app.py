@@ -92,6 +92,7 @@ def is_verified(user):
 # reaper thread prunes stale entries every few seconds.
 
 _active = {}  # sid -> {"user_id", "role", "rpi_hostname", "last_alive", "expires_at", "started_at"}
+_drop_history = {}  # sid -> timestamp of when it was evicted (reaper or beacon)
 _active_lock = Lock()
 
 # When the last session for a given RPi disappears we wait GRACE_SECONDS before turning
@@ -166,6 +167,7 @@ def _register_presence(user_id, role="", rpi_hostname=""):
             "expires_at": expires_at,
             "started_at": started,
         }
+        _drop_history.pop(sid, None)
     _cancel_pending_off(rpi_hostname)
 
 
@@ -232,6 +234,7 @@ def _drop_presence():
         return
     with _active_lock:
         entry = _active.pop(sid, None)
+        _drop_history[sid] = time.time()
     rpi = entry.get("rpi_hostname") if entry else None
     if rpi and not _has_active_session_for(rpi):
         log.info("Session %s ended for %s — scheduling relay off in %ds", sid, rpi, GRACE_SECONDS)
@@ -255,6 +258,11 @@ def _reaper_loop():
                     expired.append((sid, reason, entry["user_id"], entry.get("rpi_hostname", "")))
                     affected_rpis.add(entry.get("rpi_hostname", ""))
                     _active.pop(sid, None)
+                    _drop_history[sid] = now
+            # Housekeeping: forget drop history older than 1 hour
+            cutoff = now - 3600
+            for sid in [s for s, t in _drop_history.items() if t < cutoff]:
+                _drop_history.pop(sid, None)
         for sid, reason, user_id, rpi in expired:
             log.info("Reaper dropped session %s (user=%s, rpi=%s, reason=%s)",
                      sid, user_id, rpi, reason)
@@ -395,6 +403,14 @@ def session_end():
     return ("", 204)
 
 
+@app.after_request
+def _no_store_home(resp):
+    # Browser BACK on a cached home would skip our activation checks. Force re-fetch.
+    if request.path == "/" and request.method == "GET":
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 @app.get("/")
 @login_required
 def home():
@@ -413,10 +429,22 @@ def home():
     if user["role"] != "admin":
         pinned_rpi = session.get("pinned_rpi")
         pinned_at = session.get("pinned_at", 0)
-        if not pinned_rpi or (time.time() - pinned_at) > MAX_SESSION_SECONDS:
+        now = time.time()
+        if not pinned_rpi or (now - pinned_at) > MAX_SESSION_SECONDS:
             session.pop("pinned_rpi", None)
             session.pop("pinned_at", None)
             return redirect(url_for("expired"))
+        # If this session was previously dropped (reaper expired it, or beacon fired
+        # and grace lapsed), block the re-activation. Distinguishes "browser back after
+        # expiry" (stale sid, long-ago drop) from "mid-flow form navigation" (grace window).
+        sid = session.get("sid")
+        if sid:
+            with _active_lock:
+                dropped_at = None if sid in _active else _drop_history.get(sid)
+            if dropped_at is not None and (now - dropped_at) > GRACE_SECONDS + 2:
+                session.pop("pinned_rpi", None)
+                session.pop("pinned_at", None)
+                return redirect(url_for("expired"))
 
     _register_presence(user["id"], user["role"], rpi_hostname=session_rpi() or "")
     view = _current_session_view() or {"timer_disabled": False, "expires_in": 0, "max_remaining": 0, "at_max": False}
