@@ -136,6 +136,8 @@ Auto-refresh 3 s.
 | POST   | `/api/rpi/<hostname>/restart`     | Proxy na `/api/restart` (s tokenem). **Rebootuje celé RPi**, ~30-60 s nedostupné. |
 | POST   | `/api/qr/validate`                | Body `{rpi_hostname, token}` → `{valid: bool, window_offset}`. Používá shop/Odoo pro ověření QR tokenu. |
 
+**Auth:** všechny endpointy kromě `POST /api/qr/validate` a `GET /api/health` vyžadují HTTP Basic Auth (`HUB_ADMIN_USER` / `HUB_ADMIN_PASSWORD` env). `/api/qr/validate` zůstává otevřený, protože ho volají server-to-server shop / Odoo, a sama HMAC validace tokenu je dostatečná ochrana. Pokud `HUB_ADMIN_PASSWORD` není nastavený, hub běží OPEN — startup log na to **WARNING** vypíše.
+
 Hub neřeší autentizaci návštěvníků dashboardu — spoléhá na to, že port 8080 je vystavený **jen přes tailnet**. Pokud by se někdy publikoval do internetu, přidat auth.
 
 ---
@@ -192,6 +194,7 @@ Docker kontejner neběží nebo spadl do restart loopu. `docker compose logs` uk
 
 ## Changelog
 
+- **2026-04-19** — HTTP Basic Auth pro dashboard a control endpointy. Nové env vars `HUB_ADMIN_USER` (default `admin`) a `HUB_ADMIN_PASSWORD` (musíš nastavit pro public deploy). Bez hesla hub jede otevřený, na startup se vypíše WARNING. Bypassed paths: `POST /api/qr/validate` (server-to-server) a `GET /api/health` (Docker healthcheck).
 - **2026-04-19** — Production hub container nově mapuje **i port 8090:8080** (kromě defaultního 8080) — Hetzner reverse proxy blokuje 8080. Public access na `hub.elite-trafika.cz` jde přes 8090, tailnet/interní přes 8080. Doplněna sekce „Pozn. produkční deploy".
 - **2026-04-18** — `POST /api/qr/validate` endpoint — sdílí stejný HMAC výpočet jako RPi `/api/qr`. Shop (shop-mock, později Odoo) posílá `{rpi_hostname, token}`; hub najde RPi v `rpis.yml`, zrekonstruuje token pro aktuální a předchozí window, vrátí `valid: bool` + offset. Nový env var `QR_ROTATE_SECONDS` (default 60, musí match RPi).
 - **2026-04-18** — Nové tlačítko restart (`↻`) s confirm dialogem. Proxy endpoint `POST /api/rpi/<hostname>/restart` volá RPi `/api/restart` s tokenem. Po kliku se tlačítka na chvíli zablokují, UI se refreshne za 6 s (doba znovunaběhnutí kontejneru).

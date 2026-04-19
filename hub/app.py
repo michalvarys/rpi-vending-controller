@@ -12,13 +12,20 @@ from threading import Lock, Thread
 
 import requests
 import yaml
-from flask import Flask, abort, jsonify, render_template_string, request
+from flask import Flask, Response, abort, jsonify, render_template_string, request
 
 RPIS_FILE = Path(os.environ.get("RPIS_FILE", "/config/rpis.yml"))
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL", "3"))
 POLL_TIMEOUT = float(os.environ.get("POLL_TIMEOUT", "4"))
 # Must match QR_ROTATE_SECONDS on the RPi side. Hub recomputes the same HMAC window.
 QR_ROTATE_SECONDS = int(os.environ.get("QR_ROTATE_SECONDS", "60"))
+
+# HTTP Basic Auth gating the dashboard + control endpoints. If empty, hub runs
+# wide open (only acceptable on a tailnet-only deployment).
+HUB_ADMIN_USER = os.environ.get("HUB_ADMIN_USER", "admin").strip()
+HUB_ADMIN_PASSWORD = os.environ.get("HUB_ADMIN_PASSWORD", "").strip()
+# Paths that bypass auth: server-to-server endpoints + healthcheck.
+_PUBLIC_PATHS = {"/api/qr/validate", "/api/health"}
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "8080"))
 
@@ -115,6 +122,22 @@ def find_rpi(hostname):
 
 
 app = Flask(__name__)
+
+
+@app.before_request
+def _basic_auth():
+    if not HUB_ADMIN_PASSWORD:
+        return None
+    if request.path in _PUBLIC_PATHS:
+        return None
+    auth = request.authorization
+    if auth and auth.username == HUB_ADMIN_USER and auth.password == HUB_ADMIN_PASSWORD:
+        return None
+    return Response(
+        "Auth required",
+        status=401,
+        headers={"WWW-Authenticate": 'Basic realm="Trafika Hub"'},
+    )
 
 
 @app.get("/api/dashboard")
@@ -537,5 +560,9 @@ setInterval(refresh, 3000);
 
 if __name__ == "__main__":
     log.info("Loaded %d RPi(s) from %s", len(RPIS), RPIS_FILE)
+    if HUB_ADMIN_PASSWORD:
+        log.info("Basic auth enabled (user=%s, public bypass: %s)", HUB_ADMIN_USER, sorted(_PUBLIC_PATHS))
+    else:
+        log.warning("HUB_ADMIN_PASSWORD not set — hub UI is OPEN. Set it before exposing this hub publicly.")
     Thread(target=poller_loop, daemon=True).start()
     app.run(host=HOST, port=PORT)
