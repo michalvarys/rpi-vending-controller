@@ -6,6 +6,22 @@ Tento dokument popisuje, jak od nuly rozjet Raspberry Pi s containerizovaným ve
 
 ---
 
+## 📺 Volitelně: kiosk režim (fullscreen /qr po bootu)
+
+Pokud má RPi připojený displej (ten, na kterém má zákazník vidět QR), druhý skript nastaví automatický fullscreen Chromium na `http://localhost:8080/qr` po startu — bez přihlašování, bez panelů, bez kurzoru.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/michalvarys/rpi-vending-controller/main/scripts/install-kiosk.sh -o install-kiosk.sh
+bash install-kiosk.sh
+sudo reboot
+```
+
+Vyžaduje Raspberry Pi OS **Desktop** (labwc/LXDE). Skript nainstaluje `chromium` + `unclutter`, vygeneruje wrapper (čeká na `/api/health`, pak otevře Chromium), uloží XDG autostart entry a zapne desktop autologin přes `raspi-config`. Spouští se **jako běžný uživatel** (ne root).
+
+**Ruční vypnutí kiosku:** `rm ~/.config/autostart/trafika-kiosk.desktop && sudo reboot`.
+
+---
+
 ## 🚀 Rychlá instalace (install script)
 
 Pro čistý Raspberry Pi — jeden příkaz udělá všechno (apt, Docker, Tailscale, compose, start):
