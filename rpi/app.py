@@ -1,4 +1,5 @@
 """Trafika vending controller — webhook receiver + live dashboard (env-configured)."""
+import atexit
 import base64
 import ctypes
 import hashlib
@@ -7,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import sys
 import time
@@ -16,6 +18,15 @@ from pathlib import Path
 from threading import Lock, Thread
 
 from flask import Flask, abort, jsonify, render_template_string, request
+
+try:
+    from gpiozero import OutputDevice
+    from gpiozero.exc import GPIOZeroError
+    _GPIOZERO_IMPORTED = True
+except ImportError:
+    OutputDevice = None
+    GPIOZeroError = Exception
+    _GPIOZERO_IMPORTED = False
 
 WEBHOOK_TOKEN = os.environ.get("WEBHOOK_TOKEN", "").strip()
 if not WEBHOOK_TOKEN:
@@ -38,6 +49,11 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parent))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = DATA_DIR / "events.log"
 
+# Wiring: SB Components Zero-Relay 2-ch, channel 1 (K1) = BCM22 (phys 15), active-HIGH.
+# COM + NO on the screw terminals → default OFF when GPIO is LOW (matches our safety policy).
+RELAY_GPIO = int(os.environ.get("RELAY_GPIO", "22"))
+RELAY_ACTIVE_HIGH = os.environ.get("RELAY_ACTIVE_HIGH", "true").strip().lower() not in ("0", "false", "no")
+
 START_TIME = time.time()
 
 app = Flask(__name__)
@@ -47,6 +63,35 @@ _state_lock = Lock()
 
 _health = {"internet_ok": False, "internet_checked_at": None, "public_ip": None, "public_ip_checked_at": None}
 _health_lock = Lock()
+
+_relay_device = None
+_relay_mode = "mock"  # "gpio" once OutputDevice is live, else "mock"
+
+if _GPIOZERO_IMPORTED:
+    try:
+        _relay_device = OutputDevice(RELAY_GPIO, active_high=RELAY_ACTIVE_HIGH, initial_value=False)
+        _relay_mode = "gpio"
+    except (GPIOZeroError, OSError, RuntimeError) as exc:
+        print(f"WARN: GPIO init failed on pin {RELAY_GPIO} ({exc}); running in mock mode", file=sys.stderr)
+else:
+    print("WARN: gpiozero not installed; running in mock mode", file=sys.stderr)
+
+
+def _relay_cleanup():
+    """Force relay OFF before process exit / host reboot. Safe to call repeatedly."""
+    if _relay_device is None:
+        return
+    try:
+        _relay_device.off()
+        _relay_device.close()
+    except Exception:
+        pass
+
+
+atexit.register(_relay_cleanup)
+# Default SIGTERM handler kills the process without running atexit — convert it to a clean exit
+# so the cleanup fires on `docker stop`.
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
 
 def log_event(event, source="", note=""):
@@ -75,13 +120,20 @@ def tail_log(n=100):
 
 
 def set_relay(target, source):
-    # TODO: swap for gpiozero OutputDevice once relay pin is confirmed.
     with _state_lock:
         previous = _state["relay"]
         _state["relay"] = target
         _state["changed_at"] = datetime.now().isoformat(timespec="seconds")
         _state["changed_by"] = source
-    log_event(f"relay_{target.lower()}", source=source, note=f"{previous} -> {target}")
+    if _relay_device is not None:
+        try:
+            if target == "ON":
+                _relay_device.on()
+            else:
+                _relay_device.off()
+        except GPIOZeroError as exc:
+            log_event("relay_gpio_error", source=source, note=f"{target}: {exc}")
+    log_event(f"relay_{target.lower()}", source=source, note=f"{previous} -> {target} ({_relay_mode})")
 
 
 def require_token():
@@ -361,6 +413,7 @@ _LINUX_REBOOT_CMD_RESTART = 0x01234567
 
 def _host_reboot():
     time.sleep(1)
+    _relay_cleanup()  # explicit OFF before kernel reboot clears GPIO state
     try:
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         libc.reboot(_LINUX_REBOOT_MAGIC1, _LINUX_REBOOT_MAGIC2, _LINUX_REBOOT_CMD_RESTART, None)
@@ -521,7 +574,12 @@ setInterval(tick, 1000);
 
 
 if __name__ == "__main__":
-    log_event("service_start", source="system", note=f"device={DEVICE_NAME} default_state={_state['relay']} location={LOCATION or '-'}")
+    log_event(
+        "service_start",
+        source="system",
+        note=f"device={DEVICE_NAME} default_state={_state['relay']} location={LOCATION or '-'} "
+             f"relay={_relay_mode} gpio={RELAY_GPIO} active_high={RELAY_ACTIVE_HIGH}",
+    )
     Thread(target=_internet_poller, daemon=True).start()
     Thread(target=_public_ip_poller, daemon=True).start()
     app.run(host=HOST, port=PORT)

@@ -11,14 +11,19 @@ services:
       LOCATION: ${LOCATION:-}
       QR_ROTATE_SECONDS: ${QR_ROTATE_SECONDS:-60}
       QR_BASE_URL: ${QR_BASE_URL:-}
+      RELAY_GPIO: ${RELAY_GPIO:-22}
+      RELAY_ACTIVE_HIGH: ${RELAY_ACTIVE_HIGH:-true}
     volumes:
       - ./data:/data
       - /etc/os-release:/etc/host-os-release:ro
       - /etc/hostname:/etc/host-hostname:ro
     cap_add:
       - SYS_BOOT   # allows /api/restart to reboot the host RPi, not just the container
-    # Uncomment once real GPIO is wired up:
-    # devices:
-    #   - "/dev/gpiomem:/dev/gpiomem"
-    # group_add:
-    #   - "gpio"
+    devices:
+      - "/dev/gpiomem:/dev/gpiomem"
+      - "/dev/gpiochip0:/dev/gpiochip0"
+    group_add:
+      # Numeric GID of the host's `gpio` group (RPi OS default: 997). Name-based resolution
+      # fails because the slim Python image has no /etc/group entry for `gpio`.
+      # Zjisti na konkrétním RPi: `getent group gpio | cut -d: -f3`
+      - "${GPIO_GID:-997}"

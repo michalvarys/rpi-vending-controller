@@ -61,6 +61,43 @@ Na konci vypíše YAML blok připravený k vložení do `/opt/trafika-hub/rpis.y
 - Raspberry Pi s Raspberry Pi OS (Debian) — testováno na Pi s aarch64 (kernel 6.12). Image je multiarch, takže poběží i na amd64 dev stroji.
 - SSH přístup, uživatel se sudo právy (v návodu `varyshop`).
 - Účet na Tailscale (stejný tenant — `varyshop.eu`), ať se zařízení vidí s Odoo VPS a hubem.
+- Relé modul **SB Components Zero-Relay 2-ch** (nebo pin-kompatibilní, active-HIGH).
+
+---
+
+## 0a. Zapojení relé
+
+**Deska:** SB Components Zero-Relay (2-channel, 5 V, pro Pi Zero form factor — ale funguje na libovolném RPi přes GPIO header).
+
+**Piny (BCM):**
+
+| Kanál | BCM pin | Physical pin | Použití                          |
+|-------|---------|--------------|----------------------------------|
+| R1    | GPIO 22 | 15           | Hlavní — ovládá automat          |
+| R2    | GPIO 5  | 29           | Rezerva (zatím nevyužit)         |
+
+**Polarita:** active-HIGH — GPIO HIGH = relé sepnuto, GPIO LOW = rozepnuto. Init pinů je LOW, takže při bootu / pádu kontejneru / odpojení RPi zůstane relé **rozepnuté**.
+
+**Silová strana (svorkovnice R1):**
+
+```
+   Napájení 230 V / 24 V / 12 V ─── COM
+                            NO ─── Zařízení (automat)
+                            NC     (nezapojeno)
+```
+
+`COM + NO` zajišťuje **default-OFF**: bez proudu na cívce je obvod přerušen. `NC` schválně nepoužíváme — opačná polarita by při výpadku RPi automat zapnula.
+
+**Ruční test před nasazením** (kontejner musí být zastavený, aby pin nedržel):
+
+```bash
+python3 scripts/relay-test.py            # interaktivní: 1=toggle, s=status, q=konec
+python3 scripts/relay-test.py pulse 1 1  # sepne R1 na 1 s
+```
+
+LED na desce se musí rozsvítit při HIGH a zhasnout při LOW. Multimetrem ověř, že mezi COM a NO je při HIGH průchodnost (~0 Ω) a při LOW nekonečno.
+
+---
 
 ---
 
@@ -168,6 +205,9 @@ nano .env
 WEBHOOK_TOKEN=<vygenerovaný token>
 DEVICE_NAME=rpi-vending-2
 PORT=8080
+# Volitelné: numerická GID host skupiny `gpio` (default 997 = RPi OS).
+# Zjisti `getent group gpio | cut -d: -f3`, změň jen když to host vrátí něco jiného.
+GPIO_GID=997
 ```
 
 > **Token si poznamenej** — stejnou hodnotu vložíš do `hub/rpis.yml` na VPS a budeš ho potřebovat v Odoo webhook konfiguraci pro tento konkrétní RPi.
@@ -346,7 +386,7 @@ docker image prune   # úklid starých vrstev
 
 Udržuj tento seznam — když se něco dotáhne, přesuň do Changelogu níž a doplň příslušné kroky v návodu.
 
-- [ ] **Reálné GPIO** — `set_relay()` v `rpi/app.py` je mock. Jakmile bude potvrzený pin a typ relé (active-HIGH/LOW), nahradit `gpiozero.OutputDevice(pin, active_high=..., initial_value=False)` a odkomentovat v `docker-compose.yml` bloky `devices:` (`/dev/gpiomem`) a `group_add: [gpio]`. Do tohoto návodu pak přidat, jaký pin je na kterém RPi.
+- [ ] **Druhý relé kanál (R2 / GPIO5)** — zatím nevyužit. Rozšířit API na `?ch=1|2` až bude konkrétní use-case (osvětlení, chladič, samostatný bezpečnostní kontakt).
 - [ ] **Integrace s Odoo** — automatic action / server action, která při loginu zavolá `POST /webhook/on` na správném `<hostname>` (mapování Odoo user → RPi hostname).
 - [ ] **Způsob vypnutí** — nerozhodnuto: odhlášení v Odoo / timeout / fyzické tlačítko.
 - [ ] **Rotace logů** — `data/events.log` roste donekonečna. Přidat logrotate na host, jakmile soubor začne být velký.
@@ -364,6 +404,10 @@ Udržuj tento seznam — když se něco dotáhne, přesuň do Changelogu níž a
 
 ## Changelog
 
+- **2026-04-20** — `install.sh` nastavuje GPIO automaticky: detekuje `GPIO_GID` přes `getent group gpio`, zapíše ho do `.env`, přidá sudo-usera do skupiny `gpio` (aby host `scripts/relay-test.py` fungoval bez `sudo`) a po deploy ověří, že kontejner naběhl v `relay=gpio` módu (ne `mock`) — parsuje `data/events.log`. Při mock módu vyhodí warning s debug commandy.
+- **2026-04-20** — Dockerfile: `lgpio` pip balíček potřebuje `liblgpio.so`, který není v Debian bookworm ani trixie (balíček `liblgpio1` v repech neexistuje). Řešení: base přepnut na `python:3.13-slim-trixie`, `liblgpio` se klonuje a buildí ze zdroje z `github.com/joan2937/lg` přímo v `RUN` layeru (git clone → make → make install → ldconfig → purge build-deps). Nová env `GPIOZERO_PIN_FACTORY=lgpio` aby gpiozero šel rovnou na lgpio factory (bez fallback kaskády).
+- **2026-04-20** — Fix `group_add: gpio` → v compose nyní numerická GID (`${GPIO_GID:-997}`), protože slim Python image `gpio` skupinu nemá a resolve selhával (`Unable to find group gpio`). Nová volitelná env `GPIO_GID` v `.env` (default 997 = RPi OS; zjisti `getent group gpio | cut -d: -f3`).
+- **2026-04-20** — Reálné GPIO pro kanál 1 (R1 = BCM 22, active-HIGH, init LOW). `rpi/app.py` drží `gpiozero.OutputDevice` a `set_relay()` doopravdy spíná cívku — stav se už nejen loguje, ale fyzicky přepíná. Dockerfile přidal `gpiozero` + `lgpio`. Compose zapnul `devices: [/dev/gpiomem, /dev/gpiochip0]` a `group_add: [gpio]`. Nové env proměnné `RELAY_GPIO` (default 22) a `RELAY_ACTIVE_HIGH` (default true) — jen pro případ jiné wiring na konkrétním RPi. Fail-safe: atexit + SIGTERM handler + explicit OFF před `/api/restart` host rebootem. Pokud init GPIO selže (dev stroj, chybějící `/dev/gpiochip*`), app naběhne v **mock módu** s varováním do stderr — tj. dashboard a API fungují, jen se fyzicky nic nespíná. Ruční bench-test: `scripts/relay-test.py`. Přidána sekce **0a. Zapojení relé** s pinout tabulkou a COM+NO schématem.
 - **2026-04-19** — Volitelný kiosk mód. Nový `scripts/install-kiosk.sh` — na Pi OS Desktop (Bookworm labwc/LXDE) zajistí, že po bootu se automaticky otevře `http://localhost:8080/qr` ve fullscreen Chromium. Doinstaluje chromium + unclutter, vytvoří wrapper skript, XDG autostart entry, zapne desktop autologin přes raspi-config. Headless instalace bez displeje script nepotřebuje.
 - **2026-04-18** — QR aktivační flow. Nové endpointy `/qr` (stránka s live QR) a `/api/qr` (aktuální token). Token = HMAC-SHA256(`WEBHOOK_TOKEN`, `hostname:floor(now/60)`), rotuje každých `QR_ROTATE_SECONDS` (default 60 s). Dvě nové env proměnné: `QR_BASE_URL` (veřejná URL shopu) a `QR_ROTATE_SECONDS`. QR vede na `<QR_BASE_URL>/activate/<hostname>/<token>` — ta trasa patří do reálného Odoo modulu (mock implementace v `shop-mock/`). Hub má `POST /api/qr/validate` s identickým HMAC výpočtem.
 - **2026-04-18** — `/api/restart` nyní **rebootuje celé RPi** (ne jen kontejner). Používá `reboot(2)` syscall přes ctypes; compose nově přidává `cap_add: [SYS_BOOT]`. Při chybějící capability se degraduje na restart kontejneru. UI tooltip a confirm dialog v hubu aktualizované.

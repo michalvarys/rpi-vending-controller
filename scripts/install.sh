@@ -129,7 +129,25 @@ else
   log "Používám existující WEBHOOK_TOKEN (z env nebo staré .env)."
 fi
 
-# --- 8. Adresář + compose + .env ---
+# --- 8. GPIO skupina (pro relé kontejner) ---
+# Container užívá `group_add: ${GPIO_GID:-997}` v compose. Na RPi OS je to většinou 997,
+# ale zjistit aktuální hodnotu z host systému je spolehlivější (jiná RPi OS verze to může mít jinak).
+GPIO_GID=$(getent group gpio 2>/dev/null | cut -d: -f3 || true)
+if [[ -z "$GPIO_GID" ]]; then
+  warn "Skupina 'gpio' na hostu neexistuje — GPIO řízení relé pravděpodobně nebude fungovat. Na RPi OS ji vytváří `raspi-config` / kernel udev pravidla."
+  GPIO_GID=997
+fi
+log "Host gpio skupina má GID $GPIO_GID."
+
+# Sudo user do gpio skupiny, ať může sáhnout na /dev/gpio* i z hosta (scripts/relay-test.py).
+if [[ -n "${SUDO_USER:-}" ]] && getent group gpio >/dev/null 2>&1; then
+  if ! id -nG "$SUDO_USER" | tr ' ' '\n' | grep -qx gpio; then
+    usermod -aG gpio "$SUDO_USER" || true
+    log "Uživatel '$SUDO_USER' přidán do skupiny 'gpio' — aktivní po příštím přihlášení."
+  fi
+fi
+
+# --- 9. Adresář + compose + .env ---
 log "Nastavuju $INSTALL_DIR..."
 mkdir -p "$INSTALL_DIR/data"
 curl -fsSL "$REPO_RAW/rpi/docker-compose.yml" -o "$INSTALL_DIR/docker-compose.yml"
@@ -137,10 +155,11 @@ curl -fsSL "$REPO_RAW/rpi/docker-compose.yml" -o "$INSTALL_DIR/docker-compose.ym
 cat > "$INSTALL_DIR/.env" <<ENVFILE
 WEBHOOK_TOKEN=$WEBHOOK_TOKEN
 DEVICE_NAME=$DEVICE_NAME
-LOCATION=$LOCATION
+LOCATION="$LOCATION"
 QR_BASE_URL=$QR_BASE_URL
 QR_ROTATE_SECONDS=$QR_ROTATE_SECONDS
 PORT=$PORT
+GPIO_GID=$GPIO_GID
 ENVFILE
 chmod 600 "$INSTALL_DIR/.env"
 
@@ -148,11 +167,11 @@ if [[ -n "${SUDO_USER:-}" ]]; then
   chown -R "$SUDO_USER:$SUDO_USER" "$INSTALL_DIR"
 fi
 
-# --- 9. Pull + run ---
+# --- 10. Pull + run ---
 log "Stahuju image $IMAGE a spouštím kontejner..."
 ( cd "$INSTALL_DIR" && docker compose pull && docker compose up -d )
 
-# --- 10. Health check ---
+# --- 11. Health check ---
 log "Čekám na healthcheck..."
 for i in $(seq 1 20); do
   if curl -sf "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
@@ -165,7 +184,19 @@ for i in $(seq 1 20); do
   fi
 done
 
-# --- 11. Summary + YAML blok pro hub ---
+# --- 12. GPIO mode check — relay=gpio nebo relay=mock? ---
+if [[ -f "$INSTALL_DIR/data/events.log" ]]; then
+  relay_mode=$(grep -o 'relay=[a-z]*' "$INSTALL_DIR/data/events.log" 2>/dev/null | tail -1 | cut -d= -f2)
+  if [[ "$relay_mode" == "gpio" ]]; then
+    log "✓ Kontejner běží v GPIO módu — relé se bude reálně spínat."
+  elif [[ "$relay_mode" == "mock" ]]; then
+    warn "Kontejner naběhl v mock módu (GPIO init selhal). Zkontroluj:"
+    warn "  docker compose logs trafika-rpi | grep -i gpio"
+    warn "  /dev/gpiochip0 a /dev/gpiomem musí být vidět z kontejneru."
+  fi
+fi
+
+# --- 13. Summary + YAML blok pro hub ---
 cat <<SUMMARY
 
 ================================================================
