@@ -88,6 +88,86 @@ pcsc_scan -n   # musí ukázat "Generic Smart Card Reader Interface"
 
 **Verifikace:** po vložení karty `curl http://127.0.0.1:8080/api/card/state` musí vrátit `is_eobcanka: true`, a v `data/events.log` `relay_on source=card`.
 
+### Diagnostika / debugging
+
+**Host — pcscd vidí čtečku?**
+```bash
+systemctl status pcscd.socket         # musí být active (listening)
+pcsc_scan -n                          # enumerace + ATR každé změny stavu; Ctrl+C ukončí
+                                      # Bez karty: "No card inserted". S kartou: ATR.
+```
+Typický ATR eObčanky: `3B 7E 94 00 00 80 25 D2 03 10 01 00 56 00 00 00 02 02 00` (sekvence `D2 03 10 01 00` v historických bytech je fingerprint). ATR se ale liší podle šarže čipu — **na ATR se nespoléhej**, správný fingerprint je SW=9000 na SELECT card-mgmt AID.
+
+**Kontejner — vidí čtečku?**
+```bash
+docker compose exec trafika-rpi ls /run/pcscd/                       # musí obsahovat pcscd.comm socket
+docker compose exec trafika-rpi python -c "from smartcard.System import readers; print(readers())"
+# očekávané: [<Generic Smart Card Reader Interface ...>]
+```
+
+**App state — vložení, AID check, relé:**
+```bash
+curl -s http://127.0.0.1:8080/api/card/state | python3 -m json.tool
+# {
+#   "reader_present": true,     ← pcscd vidí čtečku
+#   "card_present": true,       ← karta je zasunutá
+#   "is_eobcanka": true,        ← SELECT card-mgmt AID vrátil 9000
+#   "last_event_at": "2026-04-21T12:23:38",
+#   "error": null,              ← nenull pokud AID check selhal
+#   "enabled": true             ← CARD_READER_ENABLED != false
+# }
+
+curl -s http://127.0.0.1:8080/api/state | python3 -m json.tool
+# relay, changed_at, changed_by, relay_expires_at (null = paused nebo OFF)
+```
+
+**Live sledování eventů** (sleduj insert/remove + relay_on/off):
+```bash
+tail -f /opt/trafika-rpi/data/events.log | grep -E "relay|card"
+docker compose logs -f trafika-rpi 2>&1 | grep -iE "card|reader"
+```
+
+**Surové APDU zkoušky** (když chceš vidět raw komunikaci s kartou — např. při porušené detekci nebo experimentech s PACE):
+```bash
+docker compose exec trafika-rpi python - <<'PY'
+from smartcard.System import readers
+c = readers()[0].createConnection()
+c.connect()
+def tx(apdu, label):
+    data, sw1, sw2 = c.transmit(apdu)
+    hx = ' '.join(f'{b:02X}' for b in apdu)
+    dhx = ' '.join(f'{b:02X}' for b in data) if data else '-'
+    print(f'[{label}] >> {hx}\n[{label}] << {dhx}  SW={sw1:02X}{sw2:02X}')
+# SELECT card-management AID (eObčanka fingerprint)
+tx([0x00,0xA4,0x04,0x0C,0x09, 0xD2,0x03,0x10,0x01,0x00,0x01,0x00,0x02,0x02], 'SEL_CARD_MGMT')
+# SELECT file-management AID + SELECT EF 0x0001 (ID cert)
+tx([0x00,0xA4,0x04,0x0C,0x0A, 0xD2,0x03,0x10,0x01,0x00,0x01,0x03,0x02,0x01,0x00], 'SEL_FILE_MGMT')
+_, sw1, sw2 = tx([0x00,0xA4,0x08,0x00,0x02, 0x00,0x01], 'SEL_EF')
+# T=0: pokud SW1=61 následuje GET RESPONSE
+if sw1 == 0x61:
+    tx([0x00,0xC0,0x00,0x00,sw2], 'GET_RESP')
+# READ BINARY cert — selže s 6982 (security) na 2021+ kartách, to je OK
+tx([0x00,0xB0,0x00,0x00,0xD0], 'READ_BIN')
+PY
+```
+
+**Co znamenají časté SW kódy:**
+- `9000` = OK
+- `61XX` = `XX` bytů odpovědi čeká, udělej `00 C0 00 00 XX` GET RESPONSE (T=0 sémantika)
+- `6982` = security status not satisfied — potřeba auth (PIN, PACE, nebo SM)
+- `6A82` = file not found (špatný FID)
+- `6B00` = wrong P1/P2 (špatné parametry)
+- `63CX` = wrong PIN, zbývá `X` pokusů (IOK má 3 default)
+- `6983` = PIN zablokovaný po 3 špatných pokusech (potřeba DOK k odblokování)
+
+**Co se věkového ověření týče:** `age_ok` **v API není**, protože DOB z čipu nečteme (2021+ karty mají ID cert za PACE/SM). `is_eobcanka: true` říká jen "je to Czech eID". Pokud potřebuješ skutečné věkové ověření, pojede se přes eDoklady/Bank iD přes QR flow — to je oficiální NIA-backed cesta.
+
+**Časté chyby a fixy:**
+- `"error": "no_card"` při VERIFY — karta vytažená během operace. Vlož znovu.
+- `is_eobcanka: false` při vložené kartě — není to Czech eID (může to být bankovní platební karta nebo ePas). V logu `docker compose logs` uvidíš `Card inserted — eObčanka=False`.
+- `reader_present: false` — pcscd na hostu neběží (`systemctl start pcscd`) nebo kontejner nemá bind-mount `/run/pcscd`.
+- Kontejner nestartuje po přidání čtečky: obvykle chybí `/run/pcscd` na hostu (pcscd nebyl nainstalovaný). Compose bind-mount vytvoří prázdný adresář, ale bez socketu pyscard spadne. Fix: `sudo apt install pcscd && sudo systemctl start pcscd.socket`.
+
 ---
 
 ## 0a. Zapojení relé
