@@ -127,13 +127,16 @@ atexit.register(_relay_cleanup)
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
 # Auto-OFF after RELAY_ON_SECONDS. Re-scheduled on every explicit ON; cancelled on explicit
-# OFF so a late tick can't override a manual state flip.
+# OFF so a late tick can't override a manual state flip. `_relay_expires_at` is an epoch
+# timestamp exposed via /api/state so the kiosk JS can render the countdown from wall
+# clock (survives page reload, stays correct between polls).
 _auto_off_timer = None
 _auto_off_lock = Lock()
+_relay_expires_at = None  # epoch seconds; None when paused (card held) or relay OFF
 
 
 def _schedule_auto_off(source):
-    global _auto_off_timer
+    global _auto_off_timer, _relay_expires_at
     with _auto_off_lock:
         if _auto_off_timer is not None:
             _auto_off_timer.cancel()
@@ -141,6 +144,7 @@ def _schedule_auto_off(source):
         t.daemon = True
         t.start()
         _auto_off_timer = t
+        _relay_expires_at = time.time() + RELAY_ON_SECONDS
 
 
 def _auto_off_fire(source):
@@ -149,11 +153,12 @@ def _auto_off_fire(source):
 
 
 def _cancel_auto_off():
-    global _auto_off_timer
+    global _auto_off_timer, _relay_expires_at
     with _auto_off_lock:
         if _auto_off_timer is not None:
             _auto_off_timer.cancel()
             _auto_off_timer = None
+        _relay_expires_at = None
 
 
 def log_event(event, source="", note=""):
@@ -219,7 +224,7 @@ def _source_from_request(default):
 
 
 def _state_payload():
-    return {**_state, "device": DEVICE_NAME}
+    return {**_state, "device": DEVICE_NAME, "relay_expires_at": _relay_expires_at}
 
 
 # ----- Device / status helpers -----
@@ -447,7 +452,9 @@ def api_qr():
 
 @app.get("/qr")
 def qr_page():
-    return render_template_string(QR_HTML, device=DEVICE_NAME, relay_on_seconds=RELAY_ON_SECONDS)
+    resp = app.make_response(render_template_string(QR_HTML, device=DEVICE_NAME, relay_on_seconds=RELAY_ON_SECONDS))
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    return resp
 
 
 @app.get("/api/device")
@@ -676,54 +683,37 @@ refreshQr();
 setInterval(qrTick, 1000);
 
 // ---------- Relay + card state polling ----------
-// Countdown ticks only when card is absent. Inserting the card freezes the display
-// at full RELAY_ON_SECONDS; pulling it out starts the fresh countdown.
-let remaining = {{ relay_on_seconds }};
-let tickIv = null;
+// Countdown is computed from backend's relay_expires_at epoch timestamp, so reloading
+// the page doesn't reset the visible timer. When the card is held, expires_at is null
+// and we show the full window as "paused".
+let expiresAt = null;
 let lastChangedAt = null;
 
 function renderCountdown() {
   const el = document.getElementById('ok-countdown');
-  if (el) el.textContent = Math.max(0, remaining);
-}
-
-function startTicking() {
-  if (tickIv) return;
-  tickIv = setInterval(() => {
-    remaining -= 1;
-    renderCountdown();
-    if (remaining <= 0) stopTicking();
-  }, 1000);
-}
-
-function stopTicking() {
-  if (tickIv) { clearInterval(tickIv); tickIv = null; }
+  if (!el) return;
+  if (expiresAt === null) {
+    el.textContent = {{ relay_on_seconds }};
+  } else {
+    el.textContent = Math.max(0, Math.round(expiresAt - Date.now() / 1000));
+  }
 }
 
 async function pollState() {
   try {
-    const [s, c] = await Promise.all([
-      fetch('/api/state').then(r => r.json()),
-      fetch('/api/card/state').then(r => r.json()),
-    ]);
-    const cardHeld = !!(c.enabled && c.card_present && c.is_eobcanka);
-
+    const s = await fetch('/api/state').then(r => r.json());
+    expiresAt = s.relay_expires_at;
     if (s.relay === 'ON') {
-      if (s.changed_at !== lastChangedAt) {
-        show('success');
-        remaining = {{ relay_on_seconds }};
-        renderCountdown();
-      }
-      if (cardHeld) stopTicking(); else startTicking();
+      if (s.changed_at !== lastChangedAt) show('success');
+      renderCountdown();
     } else {
-      stopTicking();
-      remaining = {{ relay_on_seconds }};
       show('qr');
     }
     lastChangedAt = s.changed_at;
   } catch (e) { /* network hiccup */ }
 }
-setInterval(pollState, 700);
+setInterval(pollState, 2000);     // backend sync
+setInterval(renderCountdown, 250); // smooth local tick between polls
 pollState();
 </script>
 </body>
