@@ -101,11 +101,13 @@ _card_reader = None
 
 
 def _on_card_event():
-    """Called by the card reader whenever insert/remove state changes."""
+    """Called by the card reader whenever insert/remove state changes. Re-insertion
+    while the relay is already ON extends the window — set_relay("ON") re-schedules
+    the auto-off timer."""
     if _card_reader is None:
         return
     s = _card_reader.get_state()
-    if s.get("card_present") and s.get("is_eobcanka") and _state["relay"] == "OFF":
+    if s.get("card_present") and s.get("is_eobcanka"):
         set_relay("ON", source="card")
 
 
@@ -621,6 +623,7 @@ QR_HTML = """<!doctype html>
   #screen-success { background: #166534; color: #fff; }
   .result { font-size: 3rem; font-weight: 700; text-align: center; padding: 2rem; }
   .result-sub { font-size: 1.2rem; font-weight: 400; margin-top: 1rem; opacity: .85; }
+  .result-hint { font-size: 1rem; font-weight: 400; margin-top: 2rem; opacity: .7; }
 </style>
 <script src="/static/qrcode.min.js"></script>
 </head>
@@ -632,6 +635,7 @@ QR_HTML = """<!doctype html>
   <div class="result">
     ✓ Zapnuto<br>
     <span class="result-sub"><span id="ok-countdown">{{ relay_on_seconds }}</span> s</span>
+    <div class="result-hint">Pro prodloužení znovu vložte průkaz</div>
   </div>
 </div>
 
@@ -670,27 +674,36 @@ refreshQr();
 setInterval(qrTick, 1000);
 
 // ---------- Relay state polling → success screen ----------
+// Restart the countdown whenever changed_at shifts, so re-inserting the card (or any
+// fresh set_relay ON) resets the visible timer.
 let countdownIv = null;
-let lastRelay = 'OFF';
+let lastChangedAt = null;
+
+function startCountdown() {
+  if (countdownIv) clearInterval(countdownIv);
+  let remaining = {{ relay_on_seconds }};
+  const el = document.getElementById('ok-countdown');
+  el.textContent = remaining;
+  countdownIv = setInterval(() => {
+    remaining -= 1;
+    el.textContent = Math.max(0, remaining);
+    if (remaining <= 0) clearInterval(countdownIv);
+  }, 1000);
+}
+
 async function pollRelay() {
   try {
     const s = await fetch('/api/state').then(r => r.json());
-    if (s.relay === 'ON' && lastRelay !== 'ON') {
-      show('success');
-      if (countdownIv) clearInterval(countdownIv);
-      let remaining = {{ relay_on_seconds }};
-      const el = document.getElementById('ok-countdown');
-      el.textContent = remaining;
-      countdownIv = setInterval(() => {
-        remaining -= 1;
-        el.textContent = Math.max(0, remaining);
-        if (remaining <= 0) clearInterval(countdownIv);
-      }, 1000);
-    } else if (s.relay === 'OFF' && lastRelay !== 'OFF') {
+    if (s.relay === 'ON') {
+      if (s.changed_at !== lastChangedAt) {
+        show('success');
+        startCountdown();
+      }
+    } else {
       if (countdownIv) { clearInterval(countdownIv); countdownIv = null; }
       show('qr');
     }
-    lastRelay = s.relay;
+    lastChangedAt = s.changed_at;
   } catch (e) { /* network hiccup */ }
 }
 setInterval(pollRelay, 700);
