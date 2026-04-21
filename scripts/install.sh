@@ -92,6 +92,25 @@ else
   log "Docker už je nainstalovaný ($(docker --version))"
 fi
 
+# --- 4b. pcscd (smart card daemon pro eObčanka čtečku) ---
+# Nainstaluje daemon na hostu; kontejner ho používá přes bind-mountovaný socket /run/pcscd.
+# Pokud čtečka není zapojená, pcscd prostě běží naprázdno — nic nerozbije.
+if ! command -v pcscd >/dev/null 2>&1; then
+  log "Instaluji pcscd + CCID driver (pro AXAGON CRE-SM3TC a jiné PC/SC čtečky)..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pcscd libccid pcsc-tools
+else
+  log "pcscd už je nainstalovaný."
+fi
+systemctl enable --now pcscd.socket >/dev/null 2>&1 || systemctl enable --now pcscd >/dev/null 2>&1 || warn "pcscd službu se nepodařilo zapnout — zkontroluj 'systemctl status pcscd'."
+if command -v pcsc_scan >/dev/null 2>&1; then
+  readers_out=$(timeout 3 pcsc_scan -n 2>/dev/null | head -5 || true)
+  if [[ -n "$readers_out" && "$readers_out" != *"No reader"* ]]; then
+    log "✓ Čtečka detekována."
+  else
+    warn "Čtečka není detekována — zapoj AXAGON CRE-SM3TC přes USB, pak spusť 'pcsc_scan'."
+  fi
+fi
+
 # --- 5. Tailscale ---
 if ! command -v tailscale >/dev/null 2>&1; then
   log "Instaluji Tailscale..."
@@ -160,6 +179,11 @@ QR_BASE_URL=$QR_BASE_URL
 QR_ROTATE_SECONDS=$QR_ROTATE_SECONDS
 PORT=$PORT
 GPIO_GID=$GPIO_GID
+# Age-gate přes kontaktní čtečku eObčanky. `auto` (default) = zapni, když pyscard najde
+# čtečku; `false` = úplně vypni (jen QR flow); `true` = vynuť (chyba čtečky = issue flag).
+CARD_READER_ENABLED=auto
+AGE_THRESHOLD=18
+RELAY_ON_SECONDS=60
 ENVFILE
 chmod 600 "$INSTALL_DIR/.env"
 

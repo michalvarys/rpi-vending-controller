@@ -65,6 +65,31 @@ Na konci vypíše YAML blok připravený k vložení do `/opt/trafika-hub/rpis.y
 
 ---
 
+## 0b. eObčanka čtečka (volitelné)
+
+**Deska:** AXAGON CRE-SM3TC (USB-C, kontaktní PC/SC čtečka). Stejný postup platí pro libovolnou CCID čtečku.
+
+**Flow:** zákazník vloží občanku → `pyscard` monitor detekuje insert → SELECT card-management AID `D2 03 10 01 00 01 00 02 02` → pokud SW=9000, karta je potvrzená eObčanka → relé ON na `RELAY_ON_SECONDS` (default 60 s), pak auto-off. Kiosk `/qr` stránka zobrazí zelený overlay s odpočtem.
+
+**Nečteme DOB z čipu** — novější eObčanky (2021+) mají ID certifikát za PACE/secure-messaging, což implementovat by byla 1-2 týdny kryptografické práce. Kontaktní čtečka zde funguje jen jako "karta vložena" trigger. Pro právní ověření věku je správná cesta eDoklady/Bank iD přes existující QR flow.
+
+**Prerekvizity na hostu (řeší `install.sh`):**
+```bash
+sudo apt install -y pcscd libccid pcsc-tools
+sudo systemctl enable --now pcscd.socket
+pcsc_scan -n   # musí ukázat "Generic Smart Card Reader Interface"
+```
+
+**Kontejner** — `docker-compose.yml` bind-mountuje `/run/pcscd` → kontejner talks k host pcscd přes socket. Žádný USB passthrough, žádný privileged.
+
+**Env proměnné v `.env`:**
+- `CARD_READER_ENABLED=auto` (`auto` = zapnout pokud pyscard + čtečka dostupné; `false` = úplně vypnout; `true` = vynutit, chyba = issue flag)
+- `RELAY_ON_SECONDS=60` — jak dlouho relé zůstane ON po card insertu / webhooku
+
+**Verifikace:** po vložení karty `curl http://127.0.0.1:8080/api/card/state` musí vrátit `is_eobcanka: true`, a v `data/events.log` `relay_on source=card`.
+
+---
+
 ## 0a. Zapojení relé
 
 **Deska:** SB Components Zero-Relay (2-channel, 5 V, pro Pi Zero form factor — ale funguje na libovolném RPi přes GPIO header).
@@ -404,6 +429,7 @@ Udržuj tento seznam — když se něco dotáhne, přesuň do Changelogu níž a
 
 ## Changelog
 
+- **2026-04-21** — Přidán contact eObčanka reader (AXAGON CRE-SM3TC nebo libovolná PC/SC čtečka). Po vložení karty se SELECT card-mgmt AID; pokud je to eObčanka (SW=9000), spustí se relé na `RELAY_ON_SECONDS` a auto-off timer ho pak vypne. Nové soubory: `rpi/card_reader.py` (pyscard wrapper), bind-mount `/run/pcscd` v compose, apt deps `pcscd libccid pcsc-tools` na hostu (řeší `install.sh`), apt deps `python3-pyscard python3-cryptography` v image. Nový `/api/card/state` endpoint. Kiosk `/qr` stránka polluje `/api/state` a při `ON` zobrazí zelený success overlay s odpočtem. **DOB/věk z čipu nečteme** — 2021+ eObčanky mají ID cert za PACE/SM, implementace by byla 1-2 týdny krypto; kontaktní čtečka zde slouží jen jako rychlé "vložení karty" UX (operator lokace) místo hledání QR v telefonu. Pro právní ověření věku je korektní cesta eDoklady/Bank iD přes existující QR/NIA flow.
 - **2026-04-20** — `install.sh` nastavuje GPIO automaticky: detekuje `GPIO_GID` přes `getent group gpio`, zapíše ho do `.env`, přidá sudo-usera do skupiny `gpio` (aby host `scripts/relay-test.py` fungoval bez `sudo`) a po deploy ověří, že kontejner naběhl v `relay=gpio` módu (ne `mock`) — parsuje `data/events.log`. Při mock módu vyhodí warning s debug commandy.
 - **2026-04-20** — Dockerfile: `lgpio` pip balíček potřebuje `liblgpio.so`, který není v Debian bookworm ani trixie (balíček `liblgpio1` v repech neexistuje). Řešení: base přepnut na `python:3.13-slim-trixie`, `liblgpio` se klonuje a buildí ze zdroje z `github.com/joan2937/lg` přímo v `RUN` layeru (git clone → make → make install → ldconfig → purge build-deps). Nová env `GPIOZERO_PIN_FACTORY=lgpio` aby gpiozero šel rovnou na lgpio factory (bez fallback kaskády).
 - **2026-04-20** — Fix `group_add: gpio` → v compose nyní numerická GID (`${GPIO_GID:-997}`), protože slim Python image `gpio` skupinu nemá a resolve selhával (`Unable to find group gpio`). Nová volitelná env `GPIO_GID` v `.env` (default 997 = RPi OS; zjisti `getent group gpio | cut -d: -f3`).

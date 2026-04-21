@@ -13,10 +13,16 @@ services:
       QR_BASE_URL: ${QR_BASE_URL:-}
       RELAY_GPIO: ${RELAY_GPIO:-22}
       RELAY_ACTIVE_HIGH: ${RELAY_ACTIVE_HIGH:-true}
+      RELAY_ON_SECONDS: ${RELAY_ON_SECONDS:-60}
+      CARD_READER_ENABLED: ${CARD_READER_ENABLED:-auto}
+      AGE_THRESHOLD: ${AGE_THRESHOLD:-18}
     volumes:
       - ./data:/data
       - /etc/os-release:/etc/host-os-release:ro
       - /etc/hostname:/etc/host-hostname:ro
+      # pcscd runs on the host; we talk to it via the socket. No USB passthrough needed.
+      # Clients must write to the socket, so NOT read-only.
+      - /run/pcscd:/run/pcscd
     cap_add:
       - SYS_BOOT   # allows /api/restart to reboot the host RPi, not just the container
     devices:

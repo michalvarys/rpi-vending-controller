@@ -15,7 +15,7 @@ import time
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Lock, Thread, Timer
 
 from flask import Flask, abort, jsonify, render_template_string, request
 
@@ -27,6 +27,8 @@ except ImportError:
     OutputDevice = None
     GPIOZeroError = Exception
     _GPIOZERO_IMPORTED = False
+
+from card_reader import EObcankaReader
 
 WEBHOOK_TOKEN = os.environ.get("WEBHOOK_TOKEN", "").strip()
 if not WEBHOOK_TOKEN:
@@ -53,6 +55,12 @@ LOG_FILE = DATA_DIR / "events.log"
 # COM + NO on the screw terminals → default OFF when GPIO is LOW (matches our safety policy).
 RELAY_GPIO = int(os.environ.get("RELAY_GPIO", "22"))
 RELAY_ACTIVE_HIGH = os.environ.get("RELAY_ACTIVE_HIGH", "true").strip().lower() not in ("0", "false", "no")
+RELAY_ON_SECONDS = int(os.environ.get("RELAY_ON_SECONDS", "60"))
+
+# Contact eObčanka reader: insert card, card is ID'd by SELECT card-mgmt AID, relay
+# spins ON for RELAY_ON_SECONDS. `auto` = start if pyscard + reader present; `false`
+# = skip entirely. QR flow keeps working regardless.
+CARD_READER_ENABLED = os.environ.get("CARD_READER_ENABLED", "auto").strip().lower()
 
 START_TIME = time.time()
 
@@ -88,10 +96,60 @@ def _relay_cleanup():
         pass
 
 
+# ----- Card reader (eObčanka contact) -----
+_card_reader = None
+
+
+def _on_card_event():
+    """Called by the card reader whenever insert/remove state changes."""
+    if _card_reader is None:
+        return
+    s = _card_reader.get_state()
+    if s.get("card_present") and s.get("is_eobcanka") and _state["relay"] == "OFF":
+        set_relay("ON", source="card")
+
+
+if CARD_READER_ENABLED != "false":
+    _card_reader = EObcankaReader(on_event=_on_card_event)
+    if not _card_reader.start():
+        if CARD_READER_ENABLED == "true":
+            print("WARN: CARD_READER_ENABLED=true but reader start failed", file=sys.stderr)
+        _card_reader = None
+
+
 atexit.register(_relay_cleanup)
 # Default SIGTERM handler kills the process without running atexit — convert it to a clean exit
 # so the cleanup fires on `docker stop`.
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+# Auto-OFF after RELAY_ON_SECONDS. Re-scheduled on every explicit ON; cancelled on explicit
+# OFF so a late tick can't override a manual state flip.
+_auto_off_timer = None
+_auto_off_lock = Lock()
+
+
+def _schedule_auto_off(source):
+    global _auto_off_timer
+    with _auto_off_lock:
+        if _auto_off_timer is not None:
+            _auto_off_timer.cancel()
+        t = Timer(RELAY_ON_SECONDS, _auto_off_fire, args=(source,))
+        t.daemon = True
+        t.start()
+        _auto_off_timer = t
+
+
+def _auto_off_fire(source):
+    if _state["relay"] == "ON":
+        set_relay("OFF", source=f"auto_off:{source}")
+
+
+def _cancel_auto_off():
+    global _auto_off_timer
+    with _auto_off_lock:
+        if _auto_off_timer is not None:
+            _auto_off_timer.cancel()
+            _auto_off_timer = None
 
 
 def log_event(event, source="", note=""):
@@ -134,6 +192,12 @@ def set_relay(target, source):
         except GPIOZeroError as exc:
             log_event("relay_gpio_error", source=source, note=f"{target}: {exc}")
     log_event(f"relay_{target.lower()}", source=source, note=f"{previous} -> {target} ({_relay_mode})")
+    # Auto-OFF safety net — prevent relay stuck ON if the shop/hub never sends OFF.
+    # Skip for sources that already represent the auto-off firing.
+    if target == "ON" and not source.startswith("auto_off"):
+        _schedule_auto_off(source)
+    elif target == "OFF":
+        _cancel_auto_off()
 
 
 def require_token():
@@ -320,6 +384,12 @@ def api_status():
     if internet_checked_at and not internet_ok:
         issues.append("no-internet")
 
+    # Card reader flag — only treat as issue when explicitly required (`CARD_READER_ENABLED=true`).
+    # `auto` mode falls back to QR silently.
+    if CARD_READER_ENABLED == "true":
+        if _card_reader is None or not _card_reader.get_state().get("reader_present"):
+            issues.append("no-card-reader")
+
     return jsonify({
         "ok": not issues,
         "device": DEVICE_NAME,
@@ -373,7 +443,7 @@ def api_qr():
 
 @app.get("/qr")
 def qr_page():
-    return render_template_string(QR_HTML, device=DEVICE_NAME)
+    return render_template_string(QR_HTML, device=DEVICE_NAME, relay_on_seconds=RELAY_ON_SECONDS)
 
 
 @app.get("/api/device")
@@ -424,6 +494,15 @@ def _host_reboot():
     errno = ctypes.get_errno()
     log_event("host_reboot_failed", source="system", note=f"errno={errno}, falling back to container exit")
     os._exit(0)
+
+
+@app.get("/api/card/state")
+def api_card_state():
+    if _card_reader is None:
+        return jsonify({"reader_present": False, "card_present": False, "enabled": False})
+    s = _card_reader.get_state()
+    s["enabled"] = True
+    return jsonify(s)
 
 
 @app.post("/api/restart")
@@ -532,17 +611,40 @@ QR_HTML = """<!doctype html>
 <title>{{ device }}</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { height: 100%; background: #ffffff; cursor: none; overflow: hidden; }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: ui-sans-serif, system-ui, sans-serif; }
+  html, body { height: 100%; background: #ffffff; cursor: none; overflow: hidden; user-select: none; -webkit-tap-highlight-color: transparent; }
   body { display: flex; align-items: center; justify-content: center; }
-  #qr { display: flex; align-items: center; justify-content: center; }
-  #qr canvas, #qr img { display: block; width: min(90vmin, 640px); height: auto; image-rendering: pixelated; }
+  .screen { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; }
+  .screen.active { display: flex; }
+  #screen-qr #qr { display: flex; align-items: center; justify-content: center; }
+  #screen-qr #qr canvas, #screen-qr #qr img { display: block; width: min(90vmin, 640px); height: auto; image-rendering: pixelated; }
+  #screen-success { background: #166534; color: #fff; }
+  .result { font-size: 3rem; font-weight: 700; text-align: center; padding: 2rem; }
+  .result-sub { font-size: 1.2rem; font-weight: 400; margin-top: 1rem; opacity: .85; }
 </style>
 <script src="/static/qrcode.min.js"></script>
 </head>
 <body>
-<div id="qr"></div>
+
+<div id="screen-qr" class="screen active"><div id="qr"></div></div>
+
+<div id="screen-success" class="screen">
+  <div class="result">
+    ✓ Zapnuto<br>
+    <span class="result-sub"><span id="ok-countdown">{{ relay_on_seconds }}</span> s</span>
+  </div>
+</div>
+
 <script>
+let currentScreen = 'qr';
+function show(name) {
+  if (currentScreen === name) return;
+  document.getElementById('screen-qr').classList.toggle('active', name === 'qr');
+  document.getElementById('screen-success').classList.toggle('active', name === 'success');
+  currentScreen = name;
+}
+
+// ---------- QR ----------
 const qrHolder = document.getElementById('qr');
 let rotateAt = 0;
 let qr = null;
@@ -552,21 +654,47 @@ function ensureQr(text) {
   qr = new QRCode(qrHolder, { text: text, width: 640, height: 640, correctLevel: QRCode.CorrectLevel.M });
 }
 
-async function refresh() {
+async function refreshQr() {
   try {
     const data = await fetch('/api/qr').then(r => r.json());
     rotateAt = data.rotate_at || 0;
     ensureQr(data.url || `token:${data.device}:${data.token}`);
-  } catch (e) { /* keep the stale code visible until we recover */ }
+  } catch (e) { /* keep stale QR until recovery */ }
 }
 
-function tick() {
+function qrTick() {
   const now = Math.floor(Date.now() / 1000);
-  if (rotateAt && now >= rotateAt) refresh();
+  if (rotateAt && now >= rotateAt) refreshQr();
 }
+refreshQr();
+setInterval(qrTick, 1000);
 
-refresh();
-setInterval(tick, 1000);
+// ---------- Relay state polling → success screen ----------
+let countdownIv = null;
+let lastRelay = 'OFF';
+async function pollRelay() {
+  try {
+    const s = await fetch('/api/state').then(r => r.json());
+    if (s.relay === 'ON' && lastRelay !== 'ON') {
+      show('success');
+      if (countdownIv) clearInterval(countdownIv);
+      let remaining = {{ relay_on_seconds }};
+      const el = document.getElementById('ok-countdown');
+      el.textContent = remaining;
+      countdownIv = setInterval(() => {
+        remaining -= 1;
+        el.textContent = Math.max(0, remaining);
+        if (remaining <= 0) clearInterval(countdownIv);
+      }, 1000);
+    } else if (s.relay === 'OFF' && lastRelay !== 'OFF') {
+      if (countdownIv) { clearInterval(countdownIv); countdownIv = null; }
+      show('qr');
+    }
+    lastRelay = s.relay;
+  } catch (e) { /* network hiccup */ }
+}
+setInterval(pollRelay, 700);
+pollRelay();
 </script>
 </body>
 </html>
@@ -574,11 +702,13 @@ setInterval(tick, 1000);
 
 
 if __name__ == "__main__":
+    card_mode = "off" if _card_reader is None else ("on" if _card_reader.get_state().get("reader_present") else "no-reader")
     log_event(
         "service_start",
         source="system",
         note=f"device={DEVICE_NAME} default_state={_state['relay']} location={LOCATION or '-'} "
-             f"relay={_relay_mode} gpio={RELAY_GPIO} active_high={RELAY_ACTIVE_HIGH}",
+             f"relay={_relay_mode} gpio={RELAY_GPIO} active_high={RELAY_ACTIVE_HIGH} "
+             f"card_reader={card_mode} relay_on_seconds={RELAY_ON_SECONDS}",
     )
     Thread(target=_internet_poller, daemon=True).start()
     Thread(target=_public_ip_poller, daemon=True).start()
