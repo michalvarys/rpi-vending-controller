@@ -101,14 +101,16 @@ _card_reader = None
 
 
 def _on_card_event():
-    """Called by the card reader whenever insert/remove state changes. Re-insertion
-    while the relay is already ON extends the window — set_relay("ON") re-schedules
-    the auto-off timer."""
+    """Card present = hold-the-button: relay stays ON, auto-off timer paused.
+    Card removed = start fresh RELAY_ON_SECONDS countdown."""
     if _card_reader is None:
         return
     s = _card_reader.get_state()
     if s.get("card_present") and s.get("is_eobcanka"):
         set_relay("ON", source="card")
+        _cancel_auto_off()  # freeze — relay stays ON until card is pulled
+    elif _state["relay"] == "ON":
+        _schedule_auto_off("card_removed")
 
 
 if CARD_READER_ENABLED != "false":
@@ -673,41 +675,56 @@ function qrTick() {
 refreshQr();
 setInterval(qrTick, 1000);
 
-// ---------- Relay state polling → success screen ----------
-// Restart the countdown whenever changed_at shifts, so re-inserting the card (or any
-// fresh set_relay ON) resets the visible timer.
-let countdownIv = null;
+// ---------- Relay + card state polling ----------
+// Countdown ticks only when card is absent. Inserting the card freezes the display
+// at full RELAY_ON_SECONDS; pulling it out starts the fresh countdown.
+let remaining = {{ relay_on_seconds }};
+let tickIv = null;
 let lastChangedAt = null;
 
-function startCountdown() {
-  if (countdownIv) clearInterval(countdownIv);
-  let remaining = {{ relay_on_seconds }};
+function renderCountdown() {
   const el = document.getElementById('ok-countdown');
-  el.textContent = remaining;
-  countdownIv = setInterval(() => {
+  if (el) el.textContent = Math.max(0, remaining);
+}
+
+function startTicking() {
+  if (tickIv) return;
+  tickIv = setInterval(() => {
     remaining -= 1;
-    el.textContent = Math.max(0, remaining);
-    if (remaining <= 0) clearInterval(countdownIv);
+    renderCountdown();
+    if (remaining <= 0) stopTicking();
   }, 1000);
 }
 
-async function pollRelay() {
+function stopTicking() {
+  if (tickIv) { clearInterval(tickIv); tickIv = null; }
+}
+
+async function pollState() {
   try {
-    const s = await fetch('/api/state').then(r => r.json());
+    const [s, c] = await Promise.all([
+      fetch('/api/state').then(r => r.json()),
+      fetch('/api/card/state').then(r => r.json()),
+    ]);
+    const cardHeld = !!(c.enabled && c.card_present && c.is_eobcanka);
+
     if (s.relay === 'ON') {
       if (s.changed_at !== lastChangedAt) {
         show('success');
-        startCountdown();
+        remaining = {{ relay_on_seconds }};
+        renderCountdown();
       }
+      if (cardHeld) stopTicking(); else startTicking();
     } else {
-      if (countdownIv) { clearInterval(countdownIv); countdownIv = null; }
+      stopTicking();
+      remaining = {{ relay_on_seconds }};
       show('qr');
     }
     lastChangedAt = s.changed_at;
   } catch (e) { /* network hiccup */ }
 }
-setInterval(pollRelay, 700);
-pollRelay();
+setInterval(pollState, 700);
+pollState();
 </script>
 </body>
 </html>
