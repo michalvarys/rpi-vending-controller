@@ -112,6 +112,15 @@ def interactive():
             print(f"1-{len(relays)} = toggle, a/A = all OFF/ON, s = status, q = quit")
 
 
+def hold(label):
+    print(f"Drží {label}. Ctrl+C ukončí (a vrátí všechny do OFF).")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print()
+
+
 def main():
     try:
         args = sys.argv[1:]
@@ -120,9 +129,15 @@ def main():
             return
         action = args[0].lower()
         if action == "all" and len(args) >= 2:
-            all_channels(args[1].lower() == "on")
-        elif action in ("on", "off") and len(args) >= 2:
-            set_channel(int(args[1]), action == "on")
+            on = args[1].lower() == "on"
+            all_channels(on)
+            if on:
+                hold("all ON")
+        elif action == "on" and len(args) >= 2:
+            set_channel(int(args[1]), True)
+            hold(f"R{args[1]} ON")
+        elif action == "off" and len(args) >= 2:
+            set_channel(int(args[1]), False)
         elif action == "pulse" and len(args) >= 2:
             dur = float(args[2]) if len(args) >= 3 else 0.5
             pulse(int(args[1]), dur)
