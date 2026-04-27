@@ -51,10 +51,20 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parent))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = DATA_DIR / "events.log"
 
-# Wiring: SB Components Zero-Relay 2-ch, channel 1 (K1) = BCM22 (phys 15), active-HIGH.
-# COM + NO on the screw terminals → default OFF when GPIO is LOW (matches our safety policy).
-RELAY_GPIO = int(os.environ.get("RELAY_GPIO", "22"))
-RELAY_ACTIVE_HIGH = os.environ.get("RELAY_ACTIVE_HIGH", "true").strip().lower() not in ("0", "false", "no")
+# Wiring: Waveshare RPi Relay Board (B) — 8 channels on BCM 5,6,13,16,19,20,21,26,
+# active-LOW (PC817 opto + NPN inverts). All channels fire together: when set_relay("ON")
+# is called we energize all 8 coils so any of them can drive a downstream load. With
+# COM+NO wiring this still gives default-OFF on boot (initial_value=False → pin HIGH →
+# coil de-energized → contact open).
+def _parse_gpios(s, default):
+    s = (s or "").strip()
+    if not s:
+        return default
+    return [int(p.strip()) for p in s.split(",") if p.strip()]
+
+
+RELAY_GPIOS = _parse_gpios(os.environ.get("RELAY_GPIOS"), [5, 6, 13, 16, 19, 20, 21, 26])
+RELAY_ACTIVE_HIGH = os.environ.get("RELAY_ACTIVE_HIGH", "false").strip().lower() not in ("0", "false", "no")
 RELAY_ON_SECONDS = int(os.environ.get("RELAY_ON_SECONDS", "60"))
 
 # Contact eObčanka reader: insert card, card is ID'd by SELECT card-mgmt AID, relay
@@ -72,28 +82,36 @@ _state_lock = Lock()
 _health = {"internet_ok": False, "internet_checked_at": None, "public_ip": None, "public_ip_checked_at": None}
 _health_lock = Lock()
 
-_relay_device = None
-_relay_mode = "mock"  # "gpio" once OutputDevice is live, else "mock"
+_relay_devices = []
+_relay_mode = "mock"  # "gpio" once all OutputDevices are live, else "mock"
 
 if _GPIOZERO_IMPORTED:
     try:
-        _relay_device = OutputDevice(RELAY_GPIO, active_high=RELAY_ACTIVE_HIGH, initial_value=False)
+        _relay_devices = [
+            OutputDevice(pin, active_high=RELAY_ACTIVE_HIGH, initial_value=False)
+            for pin in RELAY_GPIOS
+        ]
         _relay_mode = "gpio"
     except (GPIOZeroError, OSError, RuntimeError) as exc:
-        print(f"WARN: GPIO init failed on pin {RELAY_GPIO} ({exc}); running in mock mode", file=sys.stderr)
+        print(f"WARN: GPIO init failed on pins {RELAY_GPIOS} ({exc}); running in mock mode", file=sys.stderr)
+        for d in _relay_devices:
+            try:
+                d.close()
+            except Exception:
+                pass
+        _relay_devices = []
 else:
     print("WARN: gpiozero not installed; running in mock mode", file=sys.stderr)
 
 
 def _relay_cleanup():
-    """Force relay OFF before process exit / host reboot. Safe to call repeatedly."""
-    if _relay_device is None:
-        return
-    try:
-        _relay_device.off()
-        _relay_device.close()
-    except Exception:
-        pass
+    """Force every relay OFF before process exit / host reboot. Safe to call repeatedly."""
+    for d in _relay_devices:
+        try:
+            d.off()
+            d.close()
+        except Exception:
+            pass
 
 
 # ----- Card reader (eObčanka contact) -----
@@ -192,12 +210,13 @@ def set_relay(target, source):
         _state["relay"] = target
         _state["changed_at"] = datetime.now().isoformat(timespec="seconds")
         _state["changed_by"] = source
-    if _relay_device is not None:
+    if _relay_devices:
         try:
-            if target == "ON":
-                _relay_device.on()
-            else:
-                _relay_device.off()
+            for d in _relay_devices:
+                if target == "ON":
+                    d.on()
+                else:
+                    d.off()
         except GPIOZeroError as exc:
             log_event("relay_gpio_error", source=source, note=f"{target}: {exc}")
     log_event(f"relay_{target.lower()}", source=source, note=f"{previous} -> {target} ({_relay_mode})")
@@ -727,7 +746,7 @@ if __name__ == "__main__":
         "service_start",
         source="system",
         note=f"device={DEVICE_NAME} default_state={_state['relay']} location={LOCATION or '-'} "
-             f"relay={_relay_mode} gpio={RELAY_GPIO} active_high={RELAY_ACTIVE_HIGH} "
+             f"relay={_relay_mode} gpios={','.join(map(str, RELAY_GPIOS))} active_high={RELAY_ACTIVE_HIGH} "
              f"card_reader={card_mode} relay_on_seconds={RELAY_ON_SECONDS}",
     )
     Thread(target=_internet_poller, daemon=True).start()

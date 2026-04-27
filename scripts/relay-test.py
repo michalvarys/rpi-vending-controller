@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
-"""Interaktivní test SB Components Zero-Relay 2-ch boardu.
+"""Bench-test pro relé deska připojené přes GPIO.
 
-Piny (BCM):  R1 = GPIO22 (phys 15), R2 = GPIO5 (phys 29)
-Polarita:    active-HIGH (HIGH = sepnuto, LOW = rozepnuto)
+Defaulty pasované na **Waveshare RPi Relay Board (B), 8-channel, active-LOW**.
+Pro jiné desky přepiš RELAY_GPIOS / ACTIVE_HIGH přes environment nebo --pins / --high.
+
+Pinout (BCM): R1=5, R2=6, R3=13, R4=16, R5=19, R6=20, R7=21, R8=26
 
 Použití:
-  sudo python3 relay-test.py               # interaktivní (1/2/a/q)
-  sudo python3 relay-test.py on 1          # R1 HIGH
-  sudo python3 relay-test.py off 2         # R2 LOW
-  sudo python3 relay-test.py pulse 1 0.5   # R1 sepnout na 0.5 s
+  sudo python3 relay-test.py                # interaktivní (1-8/a/A/q)
+  sudo python3 relay-test.py on 3           # R3 zapni (active-LOW = pin LOW)
+  sudo python3 relay-test.py off 3
+  sudo python3 relay-test.py all on         # všech 8 ON
+  sudo python3 relay-test.py all off        # všech 8 OFF
+  sudo python3 relay-test.py pulse 1 0.5    # R1 sepnout na 0.5 s
+  sudo python3 relay-test.py sweep          # postupně 1..8 cvakni
+  RELAY_GPIOS=22 RELAY_HIGH=1 python3 relay-test.py    # SB Zero-Relay 1ch active-HIGH
 
-Exit vždy nastaví oba piny LOW (bezpečný stav).
+Konec vždy nastaví všechny piny do OFF (bezpečný stav).
 """
+import os
 import sys
 import time
 
@@ -21,24 +28,47 @@ except ImportError:
     print("Chybí gpiozero. Nainstaluj:  sudo apt install -y python3-gpiozero", file=sys.stderr)
     sys.exit(1)
 
-PINS = {1: 22, 2: 5}  # BCM
+
+def _parse_pins(s):
+    return [int(p.strip()) for p in s.split(",") if p.strip()]
+
+
+PINS = _parse_pins(os.environ.get("RELAY_GPIOS", "5,6,13,16,19,20,21,26"))
+ACTIVE_HIGH = os.environ.get("RELAY_HIGH", "0").strip().lower() in ("1", "true", "yes")
+
+# CLI override
+if "--pins" in sys.argv:
+    i = sys.argv.index("--pins")
+    PINS = _parse_pins(sys.argv[i + 1])
+    del sys.argv[i:i + 2]
+if "--high" in sys.argv:
+    ACTIVE_HIGH = True
+    sys.argv.remove("--high")
 
 relays = {
-    ch: OutputDevice(pin, active_high=True, initial_value=False)
-    for ch, pin in PINS.items()
+    idx + 1: OutputDevice(pin, active_high=ACTIVE_HIGH, initial_value=False)
+    for idx, pin in enumerate(PINS)
 }
 
 
 def status():
-    return " | ".join(f"R{ch}={'ON ' if r.value else 'OFF'}" for ch, r in relays.items())
+    polarity = "active-HIGH" if ACTIVE_HIGH else "active-LOW"
+    parts = " ".join(f"R{ch}={'ON' if r.value else '..'}" for ch, r in relays.items())
+    return f"{parts}   ({polarity})"
 
 
 def set_channel(ch, on):
     if ch not in relays:
-        print(f"Neznámý kanál {ch} (použij 1 nebo 2)")
+        print(f"Neznámý kanál {ch} (mám 1-{len(relays)})")
         return
     (relays[ch].on if on else relays[ch].off)()
-    print(f"R{ch} -> {'HIGH (ON)' if on else 'LOW (OFF)'}   [{status()}]")
+    print(f"R{ch} -> {'ON' if on else 'OFF'}   [{status()}]")
+
+
+def all_channels(on):
+    for r in relays.values():
+        (r.on if on else r.off)()
+    print(f"all -> {'ON' if on else 'OFF'}   [{status()}]")
 
 
 def pulse(ch, seconds):
@@ -47,28 +77,39 @@ def pulse(ch, seconds):
     set_channel(ch, False)
 
 
+def sweep():
+    for ch in relays:
+        set_channel(ch, True)
+        time.sleep(0.3)
+        set_channel(ch, False)
+
+
 def interactive():
-    print("SB Zero-Relay test — 1=toggle R1, 2=toggle R2, a=oba OFF, q=quit")
+    print(f"Bench-test {len(relays)}-ch ({', '.join(f'R{c}=BCM{p}' for c, p in zip(relays, PINS))})")
+    print("1-8 = toggle daný kanál, a = all OFF, A = all ON, s = status, q = quit")
     print(f"Start: {status()}")
     while True:
         try:
-            cmd = input("> ").strip().lower()
+            cmd = input("> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
         if cmd in ("q", "quit", "exit"):
             break
-        elif cmd == "1":
-            set_channel(1, not relays[1].value)
-        elif cmd == "2":
-            set_channel(2, not relays[2].value)
+        elif cmd.isdigit():
+            ch = int(cmd)
+            if ch in relays:
+                set_channel(ch, not relays[ch].value)
+            else:
+                print(f"jen 1-{len(relays)}")
         elif cmd == "a":
-            set_channel(1, False)
-            set_channel(2, False)
+            all_channels(False)
+        elif cmd == "A":
+            all_channels(True)
         elif cmd == "s":
             print(status())
         elif cmd:
-            print("1 / 2 = toggle, a = oba OFF, s = status, q = quit")
+            print(f"1-{len(relays)} = toggle, a/A = all OFF/ON, s = status, q = quit")
 
 
 def main():
@@ -78,11 +119,15 @@ def main():
             interactive()
             return
         action = args[0].lower()
-        if action in ("on", "off") and len(args) >= 2:
+        if action == "all" and len(args) >= 2:
+            all_channels(args[1].lower() == "on")
+        elif action in ("on", "off") and len(args) >= 2:
             set_channel(int(args[1]), action == "on")
         elif action == "pulse" and len(args) >= 2:
             dur = float(args[2]) if len(args) >= 3 else 0.5
             pulse(int(args[1]), dur)
+        elif action == "sweep":
+            sweep()
         elif action == "status":
             print(status())
         else:

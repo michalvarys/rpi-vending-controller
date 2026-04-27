@@ -179,11 +179,14 @@ QR_BASE_URL=$QR_BASE_URL
 QR_ROTATE_SECONDS=$QR_ROTATE_SECONDS
 PORT=$PORT
 GPIO_GID=$GPIO_GID
-# Age-gate přes kontaktní čtečku eObčanky. `auto` (default) = zapni, když pyscard najde
-# čtečku; `false` = úplně vypni (jen QR flow); `true` = vynuť (chyba čtečky = issue flag).
-CARD_READER_ENABLED=auto
-AGE_THRESHOLD=18
+# Relé. Default = Waveshare RPi Relay Board (B), 8-ch, active-LOW.
+# Pro jinou desku (např. SB Zero-Relay 2-ch) override na "RELAY_GPIOS=22" + "RELAY_ACTIVE_HIGH=true".
+RELAY_GPIOS=5,6,13,16,19,20,21,26
+RELAY_ACTIVE_HIGH=false
 RELAY_ON_SECONDS=60
+# Kontaktní čtečka eObčanky. `auto` (default) = zapni když pyscard najde čtečku;
+# `false` = úplně vypni (jen QR flow); `true` = vynuť (chyba = issue flag).
+CARD_READER_ENABLED=auto
 ENVFILE
 chmod 600 "$INSTALL_DIR/.env"
 

@@ -172,35 +172,46 @@ PY
 
 ## 0a. Zapojení relé
 
-**Deska:** SB Components Zero-Relay (2-channel, 5 V, pro Pi Zero form factor — ale funguje na libovolném RPi přes GPIO header).
+**Deska (default):** Waveshare RPi Relay Board (B) — 8-channel, 5 V, HAT na GPIO header.
 
 **Piny (BCM):**
 
-| Kanál | BCM pin | Physical pin | Použití                          |
-|-------|---------|--------------|----------------------------------|
-| R1    | GPIO 22 | 15           | Hlavní — ovládá automat          |
-| R2    | GPIO 5  | 29           | Rezerva (zatím nevyužit)         |
+| Kanál | BCM | Phys | Kanál | BCM | Phys |
+|-------|-----|------|-------|-----|------|
+| R1    | 5   | 29   | R5    | 19  | 35   |
+| R2    | 6   | 31   | R6    | 20  | 38   |
+| R3    | 13  | 33   | R7    | 21  | 40   |
+| R4    | 16  | 36   | R8    | 26  | 37   |
 
-**Polarita:** active-HIGH — GPIO HIGH = relé sepnuto, GPIO LOW = rozepnuto. Init pinů je LOW, takže při bootu / pádu kontejneru / odpojení RPi zůstane relé **rozepnuté**.
+**Polarita:** **active-LOW** (PC817 opto + NPN driver inverts). GPIO LOW → cívka napájená → kontakty sepnuté. Init pinů je drženo na HIGH (`initial_value=False` při `active_high=False`), takže při bootu / pádu kontejneru / pádu napájení RPi jsou všechny kanály **rozepnuté**.
 
-**Silová strana (svorkovnice R1):**
+**Silová strana — všech 8 kanálů spíná v jeden okamžik** (ON event = všech 8 ON, OFF = všech 8 OFF). Standardní zapojení per kanál:
 
 ```
    Napájení 230 V / 24 V / 12 V ─── COM
-                            NO ─── Zařízení (automat)
+                            NO ─── Zátěž (různá zařízení automatu)
                             NC     (nezapojeno)
 ```
 
-`COM + NO` zajišťuje **default-OFF**: bez proudu na cívce je obvod přerušen. `NC` schválně nepoužíváme — opačná polarita by při výpadku RPi automat zapnula.
+`COM + NO` per kanál = **default-OFF**: bez napájení cívky je obvod přerušen. `NC` schválně nepoužíváme — opačná polarita by při výpadku RPi automat zapnula.
 
-**Ruční test před nasazením** (kontejner musí být zastavený, aby pin nedržel):
+**Ruční test před nasazením** (kontejner musí být zastavený, aby piny nedržel):
 
 ```bash
-python3 scripts/relay-test.py            # interaktivní: 1=toggle, s=status, q=konec
-python3 scripts/relay-test.py pulse 1 1  # sepne R1 na 1 s
+python3 scripts/relay-test.py             # interaktivní: 1-8 toggle, A=all ON, a=all OFF, s=status, q=konec
+python3 scripts/relay-test.py all on      # všech 8 ON
+python3 scripts/relay-test.py sweep       # postupně 1..8 cvakni
+python3 scripts/relay-test.py pulse 3 1   # R3 sepni na 1 s
 ```
 
-LED na desce se musí rozsvítit při HIGH a zhasnout při LOW. Multimetrem ověř, že mezi COM a NO je při HIGH průchodnost (~0 Ω) a při LOW nekonečno.
+Při ON musí cvaknout, červená LED u kanálu se rozsvítit. Multimetrem na svorkovnici ověř, že mezi COM a NO je při ON průchodnost (~0 Ω) a při OFF nekonečno.
+
+**Pro jinou desku** (např. původní SB Components Zero-Relay 2-ch, active-HIGH, BCM22) nastav v `.env`:
+```
+RELAY_GPIOS=22
+RELAY_ACTIVE_HIGH=true
+```
+A pro test: `RELAY_GPIOS=22 RELAY_HIGH=1 python3 scripts/relay-test.py`.
 
 ---
 
@@ -509,6 +520,7 @@ Udržuj tento seznam — když se něco dotáhne, přesuň do Changelogu níž a
 
 ## Changelog
 
+- **2026-04-21** — Přepnuto na Waveshare RPi Relay Board (B) 8-channel jako default. Všech 8 kanálů spíná v jeden okamžik při relay=ON; auto-off vypne všech 8. **Active-LOW** polarita (opačně než původní SB Zero-Relay 2-ch). `RELAY_GPIO` (single) nahrazeno `RELAY_GPIOS=5,6,13,16,19,20,21,26` (CSV); `RELAY_ACTIVE_HIGH` default změněn na `false`. `scripts/relay-test.py` rozšířen o `all on/off`, `sweep` a `--pins`/`--high` overrides. Pro starou SB desku stačí v `.env` nastavit `RELAY_GPIOS=22` a `RELAY_ACTIVE_HIGH=true` — ostatní kód beze změny.
 - **2026-04-21** — Přidán contact eObčanka reader (AXAGON CRE-SM3TC nebo libovolná PC/SC čtečka). Po vložení karty se SELECT card-mgmt AID; pokud je to eObčanka (SW=9000), spustí se relé na `RELAY_ON_SECONDS` a auto-off timer ho pak vypne. Nové soubory: `rpi/card_reader.py` (pyscard wrapper), bind-mount `/run/pcscd` v compose, apt deps `pcscd libccid pcsc-tools` na hostu (řeší `install.sh`), apt deps `python3-pyscard python3-cryptography` v image. Nový `/api/card/state` endpoint. Kiosk `/qr` stránka polluje `/api/state` a při `ON` zobrazí zelený success overlay s odpočtem. **DOB/věk z čipu nečteme** — 2021+ eObčanky mají ID cert za PACE/SM, implementace by byla 1-2 týdny krypto; kontaktní čtečka zde slouží jen jako rychlé "vložení karty" UX (operator lokace) místo hledání QR v telefonu. Pro právní ověření věku je korektní cesta eDoklady/Bank iD přes existující QR/NIA flow.
 - **2026-04-20** — `install.sh` nastavuje GPIO automaticky: detekuje `GPIO_GID` přes `getent group gpio`, zapíše ho do `.env`, přidá sudo-usera do skupiny `gpio` (aby host `scripts/relay-test.py` fungoval bez `sudo`) a po deploy ověří, že kontejner naběhl v `relay=gpio` módu (ne `mock`) — parsuje `data/events.log`. Při mock módu vyhodí warning s debug commandy.
 - **2026-04-20** — Dockerfile: `lgpio` pip balíček potřebuje `liblgpio.so`, který není v Debian bookworm ani trixie (balíček `liblgpio1` v repech neexistuje). Řešení: base přepnut na `python:3.13-slim-trixie`, `liblgpio` se klonuje a buildí ze zdroje z `github.com/joan2937/lg` přímo v `RUN` layeru (git clone → make → make install → ldconfig → purge build-deps). Nová env `GPIOZERO_PIN_FACTORY=lgpio` aby gpiozero šel rovnou na lgpio factory (bez fallback kaskády).
